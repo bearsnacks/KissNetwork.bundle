@@ -124,8 +124,7 @@ def solveKA2(url, max_attempts=20, use_matches1=True, use_matches2=True, verbose
 		
 		while success == False:
 			while len(hits.keys()) < 2 and attempt < max_attempts:
-				if verbose == True:
-					log("Attempt: %02d" % (attempt+1))
+				log("Attempt: %02d" % (attempt+1))
 				hits.clear()
 				google_img_search = 'https://images.google.com/searchbyimage?image_url=%s&encoded_image=&image_content=&filename=&hl=en'
 				headers = {}

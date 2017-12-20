@@ -3,38 +3,37 @@
 """Kiss(anime, cartoon, and drama) Service code"""
 
 # import Shared Service Code
-import kcore as KCore
+import common as Common
 import metadata as Metadata
-from kheaders import Headers
+from kissheaders import Headers
+from data import Data
 from openload import OpenloadStreamFromURL
-import https_fix as HTTPS
+from kissdecrypt import KissDecrypt
+from time import sleep
 from io import open
 import requests
 import shutil
+import js2py
 
-RE_URL_OL = Regex(r'src\=["\'](https?://(?:www\.)?o(?:pen)?load.+?)["\']')
-#RE_URL_RV = Regex(r'src\=["\'](https?://(?:www\.)?rapidvideo\.[^"\']+?)["\']')
-RE_URL_RV = Regex(r'(?:src\=["\']|\||^)(https?://(?:www\.)?rapidvideo\.[^"\'\|]+)["\']?')
-RE_URL_SM = Regex(r'(?:src\=["\']|\||^)(https?://(?:www\.)?streamango\.[^"\'\|]+)["\']?')
-RE_RV_NORM = Regex(r'(https?://(?:www\.)?\w+\.\w+)/e(?:mbed)?/(\w+)')
-RE_ENC_TEST = Regex(r'/Scripts/((?:kissenc|oran|subo)(?:\.min)?\.j[^"\']+|vr\.j[^"\']+)')
+RE_URL_OL = Regex(r'src\=["\'](https?://o(?:pen)?load.+?)["\']')
+RE_URL_SM = Regex(r'src\=["\'](https?://stream\.moe/embed.+?)["\']')
+RE_ENC_TEST = Regex(r'/Scripts/(kissenc\.min\.j[^"\']+)')
 RE_WINDOW1 = Regex(r'(?s)type\=["\']text/javascript["\']\>(.*?(window\[[^\=]+).*?)\</script\>')
 RE_WINDOW2 = Regex(r'(.+window[^\=]+[^\;]+)')
 RE_ITAG = Regex(r'itag\=(\d+)')
 RE_ATOB = Regex(r'contents *?\= *?atob\(["\']([^"\']+)')
-RE_SOURCES = Regex(r'(?i)["\']?sources["\']? *?(?:\:|\=) *?(\[.*?\{[^\]]+\}.*?\])')
 
 ########################################################################################
 def MetadataObjectForURL(url):
 
     Log('*' * 80)
     Log(u'* MetadataObjectForURL url = {}'.format(url))
-    url = KCore.util.correct_url(url)
+    url = Common.CorrectURL(url)
 
     video_id = int(url.split('=')[-1])
     show_url = url.rsplit('/', 1)[0]
 
-    html = KCore.network.ElementFromURL(show_url)
+    html = ElementFromURL(show_url)
 
     genres, genres_list = Metadata.GetGenres(html)
     date_added = Metadata.GetDateAdded(html, url)
@@ -48,16 +47,16 @@ def MetadataObjectForURL(url):
         # remove 'Movie' from genre list
         genre_list = [g for g in genres if not g == 'Movie']
         mi = Metadata.GetBaseMovieInfo(html, url)
-        summary = unicode(KCore.util.string_code(string=mi['summary'], code='decode')) if mi['summary'] else None
+        summary = unicode(Common.StringCode(string=mi['summary'], code='decode')) if mi['summary'] else None
 
         return MovieObject(
             title=mi['title'],
             genres=genre_list,
-            tags=Metadata.string_to_list(KCore.util.string_code(string=mi['tags'], code='decode')) if mi['tags'] else [],
+            tags=Metadata.string_to_list(Common.StringCode(string=mi['tags'], code='decode')) if mi['tags'] else [],
             source_title=mi['source_title'],
             originally_available_at=date_added if date_added else None,
             year=int(mi['year']) if mi['year'] else None,
-            countries=Metadata.string_to_list(KCore.util.string_code(string=mi['countries'], code='decode')) if mi['countries'] else [],
+            countries=Metadata.string_to_list(Common.StringCode(string=mi['countries'], code='decode')) if mi['countries'] else [],
             thumb=thumb,
             art=art,
             summary=summary
@@ -67,8 +66,8 @@ def MetadataObjectForURL(url):
         Log('* -----TV Show-----')
 
         si = Metadata.GetBaseShowInfo(html, url)
-        summary = unicode(KCore.util.string_code(string=si['summary'], code='decode')) if si['summary'] else None
-        tags = Metadata.string_to_list(KCore.util.string_code(string=si['tags'], code='decode')) if si['tags'] else []
+        summary = unicode(Common.StringCode(string=si['summary'], code='decode')) if si['summary'] else None
+        tags = Metadata.string_to_list(Common.StringCode(string=si['tags'], code='decode')) if si['tags'] else []
         show_name_raw = html.xpath('//div[@class="barContent"]/div/a[@class="bigChar"]/text()')[0]
         start_title = Metadata.get_title(html, video_id, show_name_raw)
         season_number = Metadata.GetSeasonNumber(start_title, show_name_raw, tags, summary)
@@ -89,26 +88,14 @@ def MetadataObjectForURL(url):
             )
 
 ########################################################################################
-@deferred
 def MediaObjectsForURL(url):
 
     Log.Debug('*' * 80)
     fmt_list = [('1080', 'm37', 5000), ('720', 'm22', 2500), ('480', 'm59', 1125), ('360', 'm18', 650)]
-    url = KCore.util.correct_url(url)
+    url = Common.CorrectURL(url)
 
-    if Prefs['server'] == 'Beta':
-        Log.Debug("* Testing Beta Server")
-        return [
-            MediaObject(
-                audio_channels=2,
-                video_resolution=res,
-                optimized_for_streaming=False,
-                parts=[
-                    PartObject(**PlayVideo(url, m))
-                    ],
-                ) for res, m, b in fmt_list if Prefs['beta_res'][:-1] == res
-            ]
-    elif Prefs['force_transcode']:
+    # create media objects for each video quality
+    if Prefs['force_transcode']:
         Log.Debug('* Force Transcoding ON')
         return [
             MediaObject(
@@ -152,45 +139,35 @@ def PlayVideo(url, m, **kwargs):
     Video URL fallback system.
     Order as follows:
     * Preferred Server = KissNetwork
-        KissNetwork --> Beta --> Openload --> RapidVideo
+        KissNetwork --> Openload --> Stream.moe
+    * Preferred Server = Openload
+        Openload --> Stream.moe --> KissNetwork
+    * Preferred Server = Stream
+        Stream.moe --> KissNetwork
     """
 
     Log.Debug('*' * 80)
     Log.Debug('* Client.Product     = {}'.format(Client.Product))
     Log.Debug('* Client.Platform    = {}'.format(Client.Platform))
     Log.Debug('* Client.Version     = {}'.format(Client.Version))
-    Log.Debug('* Channel.Server1    = {}'.format(Prefs['server']))
-    Log.Debug('* Channel.Server2    = {}'.format(Prefs['server2']))
+    Log.Debug('* Channel.Server     = {}'.format(Prefs['server']))
 
-    def setup_req_url(url, ser):
-        if (ser == 'RapidVideo'):
-            req_url = '{}&s=rapid{}'.format(url, '' if 'kissasian' in url else 'video')
-        elif (ser != 'KissNetwork'):
-            req_url = '{}&s={}'.format(url, ser.lower())
-        else:
-            req_url = url
-        return req_url
+    req_url = url + ('&s={}'.format(Prefs['server'].lower()) if Prefs['server'] != 'KissNetwork' else '')
+    vurl = get_video_url(url, m, *setup_video_page(req_url))
 
-    req_url = setup_req_url(url, Prefs['server'])
-    vurl = get_video_url(url, m, KCore.network.Request(req_url))
+    if (not vurl) and (Prefs['server'] == 'KissNetwork'):
+        Log.Warn("* GoogleVideo URL offline, falling back to Openload")
+        req_url = url + '&s=openload'
+        vurl = get_video_url(url, m, *setup_video_page(req_url))
 
-    cs = Prefs['server']
-    if (not vurl):
-        cs = Prefs['server2']
-        Log.Warn("* {} URL offline, falling back to {}".format(Prefs['server'], Prefs['server2']))
-        #req_url = url + '&s={}'.format(Prefs['server2'].lower())
-        req_url = setup_req_url(url, Prefs['server2'])
-        vurl = get_video_url(url, m, KCore.network.Request(req_url))
+    if (not vurl) and (req_url.endswith('openload')):
+        Log.Warn("* Openload URL offline, falling back to Stream.moe")
+        req_url = url + '&s=stream'
+        vurl = get_video_url(url, m, *setup_video_page(req_url))
 
-    sl = set(['KissNetwork', 'Beta', 'RapidVideo', 'Openload', 'Streamango'])
-    sp = set([Prefs['server'], Prefs['server2']])
-    for s in (sl - sp):
-        if (not vurl):
-            Log.Warn("* {} URL offline, falling back to {}".format(cs, s))
-            cs = s
-            #req_url = url + '&s={}'.format(cs.lower())
-            req_url = setup_req_url(url, cs)
-            vurl = get_video_url(url, m, KCore.network.Request(req_url))
+    if (not vurl) and (req_url.endswith('stream')) and (Prefs['server'] != 'KissNetwork'):
+        Log.Warn("* Stream.moe URL offline, falling back to KissNetwork")
+        vurl = get_video_url(url, m, *setup_video_page(url))
 
     Log.Debug('* PlayVideo URL      = {}'.format(vurl))
 
@@ -211,66 +188,41 @@ def PlayVideo(url, m, **kwargs):
     Log.Debug('*' * 80)
 
     if vurl:
-        # TODO Fixed old open requests in Beta
-        # TODO add cache time for beta cache
-        if (Prefs['server'] == 'Beta') and (False):
-            http_headers = {'User-Agent': KCore.core.user_agent, 'Referer': req_url}
-            #t1 = KCore.network.init_stream(vurl)
-            t1 = KCore.network.init_stream(url=vurl, headers=http_headers, init=True)
-            Log("* beta.test[1] = {}".format(t1))
-            if not t1[0]:
-                KCore.network.init_stream(url=vurl, headers=http_headers, init=True)
-            t2 = KCore.network.init_stream(vurl)
-            Log("* beta.test[2] = {}".format(t2))
-            if not t2[1]:
-                raise Ex.MediaNotAvailable
-            return {'key': t2[1], 'file': t2[1]}
-            #return Redirect(t2[1])
-            #return IndirectResponse(VideoClipObject, key=t2[0])
-            #return {'key': t2[1], 'file': t2[1]}
-
-            #return IndirectResponse(VideoClipObject, key=vurl, http_headers=http_headers)
-            #test_file = KCore.storage.data_item_path(KCore.storage.join_path('DataTMP', 'test.mkv'))
-            #Log("* test_file location = {}".format(test_file))
-            #return IndirectResponse(VideoClipObject, key=test_file)
         return IndirectResponse(VideoClipObject, key=vurl)
 
     raise Ex.MediaNotAvailable
 
 ########################################################################################
-def get_video_url(url, m, resp):
-    if not resp:
-        return False
-    ol = RE_URL_OL.search(resp.text)
-    rv = RE_URL_RV.search(resp.text)
-    sm = RE_URL_SM.search(resp.text)
-    sd = {'Openload': ol, 'RapidVideo': rv, 'Streamango': sm, 'KissNetwork': 0}
+def setup_video_page(url):
+    if not 'Anime' in Common.GetTypeTitle(url):
+        r = NRequest(url, raw=True)
+        headers = Headers.get_headers_for_url(url)
+        dc = headers['cookie']
+        if 'k_token' in r.cookies:
+            headers.update({'cookie': '; '.join([dc, 'k_token={}'.format(r.cookies['k_token'])])})
+        page = r.text
+    else:
+        headers = None
+        r = NRequest(url, raw=True)
+        page = r.text
+    return headers, page
 
-    sl = ['RapidVideo', 'Openload', 'Streamango', 'KissNetwork']
-    sp = [s for s in [Prefs['server'], Prefs['server2']] if s != 'KissNetwork']
-    for s in sp:
-        si = sl.index(s)
-        sl = sl[:si] + sl[si+1:]
-
-    for n in (sp + sl):
-        Log("* Testing for {} Video URL in {}".format(n, url))
-        r = sd[n]
-        if r:
-            iurl = r.group(1)
-            Log.Debug('* {} URL             = {}'.format(n, iurl))
-            if (n == 'Openload'):
-                return get_openload_url(iurl)
-            elif (n == 'RapidVideo'):
-                return get_rapidvideo_url(iurl, m)
-            elif (n == 'Streamango'):
-                return get_streamango_url(iurl, m)
-        elif (r == 0):
-            return get_googlevideo_url(url, m, resp)
-
-    return False
+########################################################################################
+def get_video_url(url, m, headers, page):
+    ol = RE_URL_OL.search(page)
+    st = RE_URL_SM.search(page)
+    if ol:
+        Log.Debug('* OpenLoad URL       = {}'.format(ol.group(1)))
+        vurl = get_openload_url(ol.group(1))
+    elif st:
+        Log.Debug('* StreamMoe URL      = {}'.format(st.group(1)))
+        vurl = get_streammoe_url(st.group(1))
+    else:
+        vurl = get_googlevideo_url(page, url, m, headers)
+    return vurl
 
 ####################################################################################################
-def get_googlevideo_url(url, m, resp):
+def get_googlevideo_url(page, url, m, headers):
     """
     Get GoogleVideo URLs
     Returns the Hights stream playable depending on the previous Stream Selections
@@ -281,18 +233,14 @@ def get_googlevideo_url(url, m, resp):
         If 1080p was previously chosen, then 720p will be used
     """
 
-    page = resp.text
-    headers = resp.headers
-    page_url = resp.url
     html = HTML.ElementFromString(page)
     sQual = Regex(r'(id\="slcQualix")').search(page)
     olist = html.xpath('//select[@id="%s"]/option' %("slcQualix" if sQual else "selectQuality"))
-    tt = KCore.util.get_tt(url)
-    ttl = tt.lower()
-    if not olist and (not page_url.endswith('openload')):
-        Log.Error('* This Video is broken, Kiss{} is working to fix it.'.format(tt))
-        #raise Ex.MediaNotAvailable
-        return False
+    type_title = Common.GetTypeTitle(url)
+    type_title_lower = type_title.lower()
+    if not olist:
+        Log.Error('* This Video is broken, Kiss{} is working to fix it.'.format(type_title))
+        raise Ex.MediaNotAvailable
 
     vurl = False
     vurls = list()
@@ -315,11 +263,22 @@ def get_googlevideo_url(url, m, resp):
 
     for node in olist:
         if enc_test:
+            post_data = None
             try:
-                vurl_old = KCore.rks.decrypt(node.get('value'), url, headers)
-            except Exception as e:
-                Log.Error(u"* get_google_video[Error]: Cannot decrypt values in {} >>> {}".format(url, e))
-                vurl_old = ['tmp']
+                js = RE_WINDOW1.search(page)
+                if js and (js.group(2) != 'window.location.href'):
+                    ra = RE_WINDOW2.findall(js.group(1))
+                    for s in ra:
+                        jsc = js2py.EvalJs()
+                        jsc.execute('var window = {};' + s)
+                        if 'krsk' in jsc.window.to_dict():
+                            post_data = jsc.window.to_dict()
+                            post_data = [{d: post_data[d]} for d in post_data.keys() if not Regex(r'(\d+)').search(d)]
+                            post_data = post_data[0] if len(post_data) == 1 else ""
+                            break
+            except:
+                Log.Exception('* get_googlevideo_url Error: >>>')
+            vurl_old = KissDecrypt.decrypt(node.get('value'), type_title_lower, url, headers, post_data)
         else:
             vurl_old = String.Base64Decode(node.get('value'))
 
@@ -357,17 +316,6 @@ def get_googlevideo_url(url, m, resp):
                 #Log.Debug('* Selecting {}p stream'.format(mm))
                 break
         Log.Debug('* Selecting {}p stream'.format(mm))
-    elif enc_test and page_url.endswith('openload'):
-        olr = Regex(r'\$kissenc\.decrypt\(["\']([^"\']+)["\']').findall(page)
-        vurl = get_openload_url(KCore.rks.decrypt(olr[0], url, headers)) if olr else False
-    elif enc_test and ('rapid' in page_url.split('?')[-1]):
-        rvr = Regex(r'\$kissenc\.decrypt\(["\']([^"\']+)["\']').findall(page)
-        vurl = get_rapidvideo_url(KCore.rks.decrypt(rvr[0], m)) if rvr else False
-
-    if ((ttl == 'cartoon') or (ttl == 'drama')) and ('Play?' in vurl):
-        Log.Debug(u"* Trying to get {} Redirect Link for '{}'".format(ttl, vurl))
-        headers['referer'] = url
-        vurl = get_url_redirect_v2(vurl, headers)
 
     return vurl
 
@@ -378,7 +326,7 @@ def get_openload_url(url):
     Code returns stream link for OpenLoad videos
     """
 
-    http_headers = {'User-Agent': KCore.core.user_agent, 'Referer': url}
+    http_headers = {'User-Agent': Common.USER_AGENT, 'Referer': url}
     ourl = OpenloadStreamFromURL(url, http_headers=http_headers)
     if ourl:
         rourl = get_url_redirect_v2(ourl, http_headers)
@@ -388,106 +336,32 @@ def get_openload_url(url):
     return False
 
 ####################################################################################################
-def get_rapidvideo_url(url, m):
-    """Get RapidVideo.com URLs"""
+def get_streammoe_url(moe_url):
+    """Get Stream.moe URLs"""
 
-    page = None
     try:
-        page = HTTP.Request(url, cacheTime=CACHE_1MINUTE).content
-    except Ex.URLError, e:
-        if 'SSLError' in str(e.args):
-            try:
-                page = HTTPS.Request(url)
-            except:
-                Log.Exception("* RapidVideo Error[0]: for '{}' >>>".format(url))
+        page = HTTP.Request(moe_url, cacheTime=CACHE_1MINUTE).content
     except:
-        Log.Exception("* RapidVideo Error[1]: for '{}' >>>".format(url))
-
-    if not page:
+        Log.Exception('* StreamMoe Error: >>>')
         return False
 
-    rs = RE_SOURCES.search(page)
-    if not rs:
-        return False
+    r = RE_ATOB.search(page)
+    if r:
+        html_text = String.Base64Decode(r.group(1))
+        html = HTML.ElementFromString(html_text)
 
-    s = rs.group(1).replace("'", '"')
-    sources = list()
-    for src in JSON.ObjectFromString(s):
-        src['res'] = int(src['res'][:-1] if src['res'].lower().endswith('p') else src['res'])
-        if src['file'].startswith('/'):
-            src['file'] = RE_RV_NORM.search(url).group(1) + src['file']
-        sources.append({'file': src['file'], 'res': src['res']})
+        vurl = html.xpath('//source/@src')
+        if vurl:
+            return vurl[0]
 
-    fmt_dict = {'37': 1080, '22': 720, '59': 480, '18': 360}
-    Log.Debug('* pre resolution selected = {}({})'.format(m, fmt_dict[m[1:]]))
-    res = 0
-    vurl = None
-    for item in Util.ListSortedByKey(sources, 'res'):
-        vurl = item['file']
-        res = item['res']
-        if res == fmt_dict[m[1:]]:
-            break
-        elif res > fmt_dict[m[1:]]:
-            break
-    Log.Debug('* Selecting {}p stream'.format(res))
-
-    if not vurl:
-        return False
-    return vurl
-
-####################################################################################################
-def get_streamango_url(url, m):
-    """Get Streamango.com URLs"""
-
-    page = None
-    try:
-        page = HTTP.Request(url, cacheTime=CACHE_1MINUTE).content
-    except Ex.URLError, e:
-        if 'SSLError' in str(e.args):
-            try:
-                page = HTTPS.Request(url)
-            except:
-                Log.Exception("* Streamango Error[0]: for '{}' >>>".format(url))
-    except:
-        Log.Exception("* Streamango Error[1]: for '{}' >>>".format(url))
-
-    if not page:
-        return False
-
-    sl = list()
-    if Regex(r'(?i)s(?:ou)?rces *?\= *?(\[\])\;').search(page):
-        for s in Regex(r'(?i)s(?:ou)?rces\.push\((\{[^\)]+)\)').findall(page):
-            d = JSON.ObjectFromString(s)
-            if d['type'] != 'video/mp4':
-                continue
-            if d['src'].startswith('//'):
-                d['src'] = 'https:' + d['src']
-            sl.append(d)
-    if not sl:
-        return False
-
-    fmt_dict = {'37': 1080, '22': 720, '59': 480, '18': 360}
-    Log.Debug('* pre resolution selected = {}({})'.format(m, fmt_dict[m[1:]]))
-    res = 0
-    vurl = None
-    for item in Util.ListSortedByKey(sl, 'height'):
-        vurl = item['src']
-        res = item['height']
-        if res == fmt_dict[m[1:]]:
-            break
-        elif res > fmt_dict[m[1:]]:
-            break
-    Log.Debug('* Selecting {}p stream'.format(res))
-    if not vurl:
-        return False
-    return vurl
+    return False
 
 ####################################################################################################
 def get_url_redirect_v2(input_url, http_headers=None):
     """URL Redirect V2 using requests.head"""
 
     if not http_headers:
-        http_headers = {'User-Agent': KCore.core.user_agent, 'Referer': input_url}
+        http_headers = {'User-Agent': Common.USER_AGENT, 'Referer': input_url}
 
     r = requests.head(input_url, headers=http_headers)
     if 'location' in r.headers.keys():
@@ -499,28 +373,166 @@ def get_url_redirect_v2(input_url, http_headers=None):
     Log.Debug(u'* URL Redirect: Headers = {}'.format(r.headers))
     return input_url
 
+####################################################################################################
+def html_from_error(page, name, resp):
+    error = {'closed': False, 'unavailable': False, 'human': False}
+    for err in Common.ERROR_LIST:
+        if Regex(r'(?i)(^%s$)' %err).search(page.text):
+            if err.lower() == "the service is unavailable.":
+                Log.Warn(u"* <ServiceCode>, html_from_error:{} Not Caching '{}'".format(err, page.url))
+                error['unavailable'] = True
+                break
+            else:
+                Log.Warn(str(page.text.strip()))
+                error['closed'] = True
+                return page if resp else HTML.Element('head', 'Error'), error
+
+    if Regex(r'(/recaptcha/api\.js)').search(page.text):
+        Log.Error(u'* <ServiceCode>, html_from_error: Human Verification needed for \'{}\''.format(page.url))
+        Log.Warn(str(page.text.strip()))
+        error['human'] = True
+        return page if resp else HTML.Element('head', 'Error'), error
+    else:
+        Data.Save(Data.HTTP(name), page if resp else page.text, resp)
+    return page if resp else HTML.ElementFromString(page.text), error
+
+####################################################################################################
+def get_element_from_url(url, name, count=0, resp=False):
+    """Error Handling for ServiceCode URL Requests"""
+
+    try:
+        page = requests.get(url, headers=Headers.get_headers_for_url(url))
+        if (int(page.status_code) == 503) or (len(page.history) > 0):
+            if count <= 1:
+                count += 1
+                if len(page.history) > 0:
+                    type_title = Common.GetTypeTitle(url)
+                    req_base_url = Common.RE_URL_BASE.search(page.url).group(1)
+                    base_url = Common.RE_URL_BASE.search(url).group(1)
+                    if req_base_url == base_url:
+                        page = requests.get(page.url, headers=Headers.get_headers_for_url(req_base_url))
+                        html = html_from_error(page, name, resp)
+                        return html[0]
+                    else:
+                        Log.Warn('* <ServiceCode>, get_element_from_url Error: HTTP 301 Redirect Error. Refreshing {} Domain'.format(type_title))
+                        Log.Warn('* <ServiceCode>, get_element_from_url Error: page history {} | {}'.format(url, page.history))
+                        Domain.UpdateDomain(type_title, True)
+                        url = Common.CorrectURL(url)
+                else:
+                    error = html_from_error(page, name, resp)
+                    if error[1]['unavailable']:
+                        Log.Warn("* <ServiceCode>, URL unavailable. Trying again for '{}'".format(page.url))
+                        sleep(2)
+                    elif error[1]['closed']:
+                        Log.Warn("* <ServiceCode>, Site Closed for Maintenance.")
+                        return error[0]
+                    else:
+                        Log.Warn('* <ServiceCode>, HTTP 503 Error: Refreshing site cookies')
+                        Headers.get_headers_for_url(url, update=True)
+                return get_element_from_url(url, name, count, resp)
+            else:
+                Log.Error('* <ServiceCode>, get_element_from_url Error: HTTP 503 Site error, tried refreshing cookies but that did not fix the issue')
+                if Data.Exists(Data.HTTP(name)):
+                    Log.Warn('* Using bad page')
+                    return page if resp else HTML.ElementFromString(page.text)
+        else:
+            try:
+                page.raise_for_status()
+                html = html_from_error(page, name, resp)
+                return html[0]
+            except Exception, e:
+                if (int(page.status_code) == 522):
+                    Log.Error('* <ServiceCode>, get_element_from_url Error: HTTP 522 Site Error, site is currently offline')
+                elif (int(page.status_code) == 524):
+                    Log.Error('* <ServiceCode>, get_element_from_url Error: HTTP 524 Site Error, A timeout occurred')
+                    if count < 1:
+                        Log.Debug("* ReTrying '{}'".format(page.url))
+                        count += 1
+                        return get_element_from_url(url, name, count, resp)
+                else:
+                    Log.Error('* <ServiceCode>, get_element_from_url Error: Unknown Site Error, check output below.')
+                Log.Error(u'* {}'.format(e))
+    except:
+        Log.Exception(u'* <ServiceCode>, get_element_from_url Error: Cannot load {}'.format(url))
+
+    return False if resp else HTML.Element('head', 'Error')
+
+####################################################################################################
+def ElementFromURL(url):
+    """setup requests html"""
+
+    match = False
+    name = Hash.MD5(url)
+    path = Data.data_item_path('DataHTTP')
+    Data.ensure_dirs(path)
+    files = [f for f in Data.list_dir(path) if Data.file_exists(Data.join_path(path, f))]
+
+    for filename in files:
+        if filename == name:
+            match = True
+            if (Datetime.FromTimestamp(Data.last_modified(Data.join_path(path, filename))) + Common.TIMEOUT) <= Datetime.Now():
+                Log.Debug("* Re-Caching '{}' to DataHTTP".format(url))
+                html = get_element_from_url(url, name)
+                break
+            else:
+                Log.Debug("* Fetching '{}' from DataHTTP".format(url))
+                html = HTML.ElementFromString(Data.Load(Data.HTTP(filename)))
+                break
+
+    if not match:
+        Log.Debug("* Caching '{}' to DataHTTP".format(url))
+        html = get_element_from_url(url, name)
+
+    return html
+
+####################################################################################################
+def NRequest(url, raw=False):
+    """setup requests text page"""
+
+    match = False
+    name = Hash.MD5(('resp_' if raw else '')+url)
+    path = Data.data_item_path('DataHTTP')
+    Data.ensure_dirs(path)
+    files = [f for f in Data.list_dir(path) if Data.file_exists(Data.join_path(path, f))]
+
+    for filename in files:
+        if filename == name:
+            match = True
+            if (Datetime.FromTimestamp(Data.last_modified(Data.join_path(path, filename))) + Common.TIMEOUT) <= Datetime.Now():
+                Log.Debug("* Fetching fresh data for '{}'".format(url))
+                r = get_element_from_url(url, name, resp=raw)
+                break
+            else:
+                Log.Debug("* Fetching '{}' from DataHTTP".format(url))
+                r = Data.Load(Data.HTTP(filename), raw)
+                break
+
+    if not match:
+        Log.Debug("* URL Not in Cache, Fetching fresh data from '{}'".format(url))
+        r = get_element_from_url(url, name, resp=raw)
+
+    if not r:
+        raise Ex.MediaNotAvailable
+    return r
+
 ########################################################################################
 def get_thumb(url):
     thumb = None
-    html = KCore.network.ElementFromURL(url)
-    cover_url = "na"
-    tmp_curl = html.xpath('//head/link[@rel="image_src"]/@href')
-    if tmp_curl:
-        curl = tmp_curl[0] if tmp_curl[0].startswith('http') else KCore.util.get_base_url(url) + tmp_curl[0]
-        cover_url = KCore.util.correct_cover_image(curl)
+    html = ElementFromURL(url)
+    cover_url = Common.CorrectCoverImage(html.xpath('//head/link[@rel="image_src"]/@href')[0])
 
-    if KCore.util.is_kiss_url(cover_url):
+    if Common.is_kiss_url(cover_url):
         cover_file = cover_url.rsplit('/')[-1]
-        tt = KCore.util.get_tt(url)
-        if KCore.storage.cover_exists(KCore.storage.join_path(tt, cover_file)):
-            return KCore.storage.data_object(KCore.storage.Covers(KCore.storage.join_path(tt, cover_file)))
+        type_title = Common.GetTypeTitle(url)
+        if Data.CoverExists(Data.join_path(type_title, cover_file)):
+            return Data.data_object(Data.Covers(Data.join_path(type_title, cover_file)))
 
-        type_dir = KCore.storage.data_item_path(KCore.storage.Covers(tt))
-        KCore.storage.ensure_dirs(type_dir)
-        path = KCore.storage.join_path(type_dir, cover_file)
+        type_dir = Data.data_item_path(Data.Covers(type_title))
+        Data.ensure_dirs(type_dir)
+        path = Data.join_path(type_dir, cover_file)
         Log("* file save path '{}'".format(path))
 
-        if not KCore.storage.file_exists(path):
+        if not Data.file_exists(path):
             r = requests.get(cover_url, headers=Headers.get_headers_for_url(cover_url), stream=True)
             if r.status_code == 200:
                 with open(path, 'wb') as f:
@@ -532,8 +544,8 @@ def get_thumb(url):
         else:
             Log.Warn('* Cover file already exists, Skipped file save.')
 
-        if KCore.storage.cover_exists(KCore.storage.join_path(tt, cover_file)):
-            return KCore.storage.data_object(KCore.storage.Covers(KCore.storage.join_path(tt, cover_file)))
+        if Data.CoverExists(Data.join_path(type_title, cover_file)):
+            return Data.data_object(Data.Covers(Data.join_path(type_title, cover_file)))
 
         Log.Error("* Issues loading '{}'".format(path))
     elif 'http' in cover_url:
