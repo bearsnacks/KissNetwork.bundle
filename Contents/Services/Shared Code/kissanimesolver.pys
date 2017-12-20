@@ -1,0 +1,1037 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+import re,sys,urllib2,HTMLParser,urllib,urlparse,json,os,io
+import random, time, cookielib
+import base64
+import httplib
+
+try:
+	from __builtin__ import eval
+	if 'plex' not in os.getcwd():
+		raise
+	resources_path = os.path.join(os.getcwd().lstrip('\\\?').split('Plug-in Support')[0], 'Plug-ins','KissNetwork.bundle','Contents','Resources')
+except:
+	resources_path = os.getcwd()
+
+# path constants
+
+#-------------------------------------------------------------------------------------------------------------
+# Enforce IPv4 for GetlinkAPI nks Google li
+# do this once at program startup
+# Reference: http://stackoverflow.com/questions/2014534/force-python-mechanize-urllib2-to-only-use-a-requests
+#--------------------
+import socket
+origGetAddrInfo = socket.getaddrinfo
+
+def getAddrInfoWrapper(host, port, family=0, socktype=0, proto=0, flags=0):
+	return origGetAddrInfo(host, port, socket.AF_INET, socktype, proto, flags)
+	
+def log(msg):
+	try:
+		Log("KissAnimeSolver: %s" % msg)
+	except:
+		print "KissAnimeSolver: %s" % msg
+
+# #replace the original socket.getaddrinfo by our version
+# socket.getaddrinfo = getAddrInfoWrapper
+# socket.has_ipv6 = False
+#-------------------------------------------------------------------------------------------------------------
+
+IGNORE_WORDS = ['the','png','gif','jpg','jpeg']
+REUSE_HEADERS = True
+EXACT_MATCH = True
+DECODE_TEMPLATE = {'openload':{'enabled':True, 'regex':'src=\"(http.*openload\.co.*?)\"', 'video':None},'rapidvideo':{'enabled':True, 'regex':'src=\"(http.*rapidvideo\.com.*?)\"', 'video':None},'streamango':{'enabled':True, 'regex':'src=\"(http.*streamango\.com.*?)\"', 'video':None},'beta':{'enabled':True, 'regex':'href=\"(http.*googlevideo.com.*?)\"', 'video':None},'kissanime':{'enabled':True, 'regex':'href=\"(http.*googlevideo.com.*?)\"', 'video':None}}
+DB = {} # Database - keep/store as static for saving processed captcha images
+DB['bighugelabs'] = {'Usage_Error':False,'Usage_exceeded_ts':time.time()}
+DB_file = os.path.join(resources_path, 'DB.json')
+
+log("DB File path: %s" % DB_file)
+
+try:
+	with io.open(DB_file, 'r') as f:
+		file_read = f.read()
+		
+	if file_read != None:
+		DB = json.loads(file_read)
+		log( "--- Loaded DB file ---" )
+		log( "DB >> No. of stored keys: %s" % str(len(DB.keys())))
+except:
+	pass
+	
+if 'bighugelabs' not in DB.keys():
+	DB['bighugelabs'] = {'Usage_Error':False,'Usage_exceeded_ts':time.time()}
+
+BH_API_DEFAULT = 'c00e667a54b01896ad08130f4489e08d' # signup -> https://words.bighugelabs.com/api.php
+BH_API = ''
+
+PROGRESS = {}
+GOOGLE_RES = []
+
+def getGoogleStatus():
+	if len(GOOGLE_RES) == 0:
+		return True
+	del GOOGLE_RES[:]
+	return False
+
+def getProgress(key):
+	if key in PROGRESS.keys():
+		if time.time() - PROGRESS[key]['ts'] > 60 * 60 * 5: # store for 300 mins/5 hrs.
+			return -1
+		return PROGRESS[key]['status']
+	return -1
+	
+def getPlayUrls(key):
+	if key in PROGRESS.keys():
+		return PROGRESS[key]['playurls']
+	return None
+
+def solveKA(url, max_attempts=20, use_matches1=True, use_matches2=True, verbose=False):
+
+	try:
+		verbose = Prefs['debug']
+	except:
+		pass
+		
+	return solveKA2(url, max_attempts, use_matches1, use_matches2, verbose)
+	
+def solveKA2(url, max_attempts=20, use_matches1=True, use_matches2=True, verbose=False):
+	PROGRESS[url] = {'status':1, 'playurls':None, 'ts':time.time(), 'success':False}
+	DECODE = dict(DECODE_TEMPLATE)
+	BASE_URL = 'http://kissanime.ru'
+	hits = {}
+	attempt = 0
+	res = None
+	target = ''
+	post_url = None
+	reUrl = None
+	post_data = {}
+	KAheaders = None
+	KAcookie = None
+	success = False
+	xtime = time.time()
+	
+	BH_API = BH_API_DEFAULT
+	try:
+		BH_API_TEMP = Prefs['bh_api']
+		if BH_API_TEMP != None and len(BH_API_TEMP) > 5:
+			BH_API = BH_API_TEMP.strip()
+	except:
+		pass
+	
+	try:
+		log( url )
+		
+		while success == False:
+			while len(hits.keys()) < 2 and attempt < max_attempts:
+				if verbose == True:
+					log("Attempt: %02d" % (attempt+1))
+				hits.clear()
+				google_img_search = 'https://images.google.com/searchbyimage?image_url=%s&encoded_image=&image_content=&filename=&hl=en'
+				headers = {}
+				headers['User-Agent'] = randomagent()	
+				headers['Referer'] = url
+				
+				if REUSE_HEADERS == True and KAheaders != None:
+					headers = KAheaders
+					headers['Cookie'] = KAcookie
+					headers['Referer'] = url
+
+					page = request(url, headers=headers, httpsskip=True)
+				else:
+					page, KAheaders, KAcontent, KAcookie = request(url, headers=headers, httpsskip=True, output='extended')
+				
+				if reUrl == None:
+					reUrl = re.findall(r'name=\"reUrl\" value=\"(.*?)\"',page)[0]
+					#print reUrl
+				
+				if post_url == None:
+					post_url = re.findall(r'form action=\"(.*?)\"',page)[0]
+					post_url = urlparse.urljoin(BASE_URL, post_url)
+					#print post_url
+				
+				targets = re.findall(r'Choose the.*?\">(.*?)</div>',page,re.S)[0]
+				targets = targets.replace('\r','').replace('\n','').strip()
+				targets = re.findall(r'(.*?)<.*>(.*?)</s', targets, re.S)[0]
+				target = [t.strip().split(',') for t in targets]
+				target_clean = []
+				for t in target:
+					target_clean_t2 = []
+					for t2 in t:
+						target_clean_t2.append(t2.strip().lower())
+					target_clean.append(target_clean_t2)
+				target = target_clean
+					
+				if verbose == True:
+					log( "Target : %s" % target)
+				
+				cap_imgs = parseDOM(page, 'img', ret='src')
+				#print cap_imgs
+				
+				cap_imgs_dict = []
+				cap_imgs_dict_st = []
+				
+				headers['Referer'] = 'http://google.com'
+				headers['Cookie'] = 'NID=118=N1I4MG-FBvrWTR8Oyh-bA32uriO-FIgvH0gSxO8MYM3cJpR6XkwbHe6JYInLK5RCOQbNZO4s17Una888G8T2im6y7rs0r6wPD6JpQBXLjTOr15bq8_inYzTUJ4H_VqOG; 1P_JAR=2017-12-1-9; DV=c-elpFc2XycToMCKdBuTnHRnzrMVARY'
+				
+				idx = 0
+				for img in cap_imgs:
+					if 'Special' in img:
+						img_url = urlparse.urljoin(BASE_URL, img)
+						
+						google_search_img = google_img_search % img_url
+
+						if base64.b64encode(google_search_img) in DB.keys():
+							if verbose == True:
+								log( "Already processed: %s" % img_url )
+								
+							DB[base64.b64encode(google_search_img)]['meta']['idx'] = idx
+							meta = DB[base64.b64encode(google_search_img)]['meta']
+							
+							match_success = meta['match_success']
+							synonyms_success = meta['synonyms_success']
+							base_keywords = meta['base_keywords']
+							key_words_split_str = meta['keywords']
+							gurl = meta['gurl']
+							
+							try:
+								more_synonyms = []
+								if use_matches1 == True and match_success == False:
+									if verbose == True:
+										log( "--Adding matching--" )
+									for key_word in base_keywords:
+										url_syn = 'https://api.datamuse.com/words?rel_trg=%s' % key_word
+										try:
+											res_json = request(url_syn)
+											resx = json.loads(res_json)
+											for k in resx:
+												more_synonyms.append(k['word'].lower())
+											match_success = True
+										except Exception as e:
+											print 'Error: More matching : %s' % e
+											print 'key_word : %s' % key_word
+											print res_json
+										
+								if use_matches2 == True and synonyms_success == False:
+									if verbose == True:
+										log( "--Adding synonyms--" )
+									for key_word in base_keywords:
+										url_syn = 'http://words.bighugelabs.com/api/2/%s/%s/json' % (BH_API,key_word)
+										try:
+											if DB['bighugelabs']['Usage_Error'] == False:
+												res_json = request(url_syn)
+												DB['bighugelabs'] = {'Usage_Error':False,'Usage_exceeded_ts':time.time()}
+												if res_json != None and 'Usage exceeded' in str(res_json):
+													DB['bighugelabs'] = {'Usage_Error':True,'Usage_exceeded_ts':time.time()}
+												if res_json != None and str(res_json) != '404':
+													resx = json.loads(res_json)
+													if 'noun' in resx.keys():
+														if 'syn' in resx['noun'].keys():
+															for k in resx['noun']['syn']:
+																more_synonyms.append(k.lower())
+													if 'verb' in resx.keys():
+														if 'syn' in resx['verb'].keys():
+															for k in resx['verb']['syn']:
+																more_synonyms.append(k.lower())
+												synonyms_success = True
+											elif DB['bighugelabs']['Usage_Error'] == True and time.time() - DB['bighugelabs']['Usage_exceeded_ts'] > 24*60*60:
+												DB['bighugelabs'] = {'Usage_Error':False,'Usage_exceeded_ts':time.time()}
+										except Exception as e:
+											print 'Error: More syns : %s' % e
+											print 'key_word : %s' % key_word
+											print res_json
+									for m in more_synonyms:
+										key_words_split_str.append(m)
+
+							except Exception as e:
+								print 'Error: More syns : %s' % e
+								print 'key_word : %s' % key_word
+								print res_json
+							
+							meta = {'base_keywords':base_keywords, 'keywords': key_words_split_str, 'idx':idx, 'gurl':gurl, 'synonyms_success':synonyms_success, 'match_success':match_success}
+							
+							cap_imgs_dict.append(meta)
+							idx += 1
+						else:
+							if res == None:
+								res = request(google_search_img, headers=headers, output='extended')
+								
+							if res == None:
+								if verbose == True:
+									log( google_search_img )
+								g_msg = 'Blocked by Google-Image or did not responsd !'
+								GOOGLE_RES.append(g_msg)
+								raise Exception(g_msg)
+							else:
+								result, headers, content, cookie = res
+							
+							page = request(google_search_img, headers=headers, httpsskip=True)
+							
+							key_words = re.findall(r'Best guess for this image:.*?>(.*?)<',page)[0]
+							key_words_split = key_words.split(' ')
+							key_words_split_str = [x.lower() if '\\' not in x else '' for x in key_words_split]
+							base_keywords = []
+							for bi in key_words_split_str:
+								base_keywords.append(bi)
+							
+							match_success = False
+							synonyms_success = False
+							
+							try:
+								more_synonyms = []
+								if use_matches1 == True:
+									if verbose == True:
+										log( "--Adding matching--" )
+									for key_word in base_keywords:
+										url_syn = 'https://api.datamuse.com/words?rel_trg=%s' % key_word
+										try:
+											res_json = request(url_syn)
+											resx = json.loads(res_json)
+											for k in resx:
+												more_synonyms.append(k['word'].lower())
+											match_success = True
+										except Exception as e:
+											print 'Error: More matching : %s' % e
+											print 'key_word : %s' % key_word
+											print res_json
+										
+								if use_matches2 == True:
+									if verbose == True:
+										log( "--Adding synonyms--" )
+									for key_word in base_keywords:
+										url_syn = 'http://words.bighugelabs.com/api/2/%s/%s/json' % (BH_API,key_word)
+										try:
+											if DB['bighugelabs']['Usage_Error'] == False:
+												res_json = request(url_syn)
+												DB['bighugelabs'] = {'Usage_Error':False,'Usage_exceeded_ts':time.time()}
+												if res_json != None and 'Usage exceeded' in str(res_json):
+													DB['bighugelabs'] = {'Usage_Error':True,'Usage_exceeded_ts':time.time()}
+												if res_json != None and str(res_json) != '404':
+													resx = json.loads(res_json)
+													if 'noun' in resx.keys():
+														if 'syn' in resx['noun'].keys():
+															for k in resx['noun']['syn']:
+																more_synonyms.append(k.lower())
+													if 'verb' in resx.keys():
+														if 'syn' in resx['verb'].keys():
+															for k in resx['verb']['syn']:
+																more_synonyms.append(k.lower())
+												synonyms_success = True
+											elif DB['bighugelabs']['Usage_Error'] == True and time.time() - DB['bighugelabs']['Usage_exceeded_ts'] > 24*60*60:
+												DB['bighugelabs'] = {'Usage_Error':False,'Usage_exceeded_ts':time.time()}
+										except Exception as e:
+											print 'Error: More syns : %s' % e
+											print 'key_word : %s' % key_word
+											print res_json
+									for m in more_synonyms:
+										key_words_split_str.append(m)
+
+							except Exception as e:
+								print 'Error: More syns : %s' % e
+								print 'key_word : %s' % key_word
+								print res_json
+
+							meta = {'base_keywords':base_keywords, 'keywords': key_words_split_str, 'idx':idx, 'gurl':base64.b64encode(google_search_img), 'synonyms_success':synonyms_success, 'match_success':match_success}
+							cap_imgs_dict.append(meta)
+							idx += 1
+							DB[base64.b64encode(google_search_img)] = {}
+							DB[base64.b64encode(google_search_img)]['meta'] = meta
+							if verbose == True:
+								log( "--Search for image keywords added to DB--" )
+				
+				cap_imgs_dict = sorted(cap_imgs_dict, key=lambda k: k['idx'], reverse=False)
+				
+				s = 0
+				for i in cap_imgs_dict:
+					cap_imgs_dict_st.append(i)
+					
+				while len(cap_imgs_dict) > 0:
+					doBreak = False
+					for i in cap_imgs_dict:
+						gurl = i['gurl']
+						for desc in DB[gurl]['meta']['keywords']:
+							for target_word in target:
+								for keyword in target_word:
+									if 'hit' in DB[gurl].keys() and json.dumps(target_word) == json.dumps(DB[gurl]['hit']):
+										if DB[gurl]['verified_hit'] == True:
+											s_idx = str(s)
+											hits[s_idx] = {}
+											hits[s_idx]['info'] = DB[gurl]['meta']
+											hits[s_idx]['gurl'] = gurl
+											s += 1
+											doBreak = True
+											break
+									elif EXACT_MATCH == False and keyword in desc or desc in keyword and len(keyword) > 2 and len(desc) > 2 and keyword not in IGNORE_WORDS and desc not in IGNORE_WORDS and abs(len(keyword) - len(desc)) < 3:
+										s_idx = str(s)
+										hits[s_idx] = {}
+										hits[s_idx]['info'] = DB[gurl]['meta']
+										hits[s_idx]['gurl'] = gurl
+										DB[gurl]['hit'] = target_word
+										s += 1
+										doBreak = True
+										break
+									elif EXACT_MATCH == True and keyword == desc:
+										s_idx = str(s)
+										hits[s_idx] = {}
+										hits[s_idx]['info'] = DB[gurl]['meta']
+										hits[s_idx]['gurl'] = gurl
+										DB[gurl]['hit'] = target_word
+										s += 1
+										doBreak = True
+										break
+								if doBreak == True:
+									break
+							if doBreak == True:
+								break
+						cap_imgs_dict.remove(i)
+						break
+					if len(hits.keys()) >= 2:
+						break
+									
+				attempt += 1
+				PROGRESS[url]['status'] = attempt
+				
+				if verbose == True:
+					log( "Hits: %s" % str(len(hits.keys())) )
+					log( "Target: %s" % target )
+					for i in cap_imgs_dict_st:
+						log( "Choice %s: %s" % (i['idx'], i['keywords'][0:4]) )
+					log( "-----------" )
+
+				poss = [0,1,2,3]
+				if len(hits.keys()) < 2:
+					if len(hits.keys()) > 0:
+						poss.remove(int(hits['0']['info']['idx']))
+						if verbose == True:
+							log( "Removed %s from further selection" % hits['0']['info']['idx'] )
+						
+					for i in range(0, len(poss)):
+						g = random.choice(poss)
+						poss.remove(g)
+						s_idx = str(len(hits.keys()))
+						hits[s_idx] = {}
+						hits[s_idx]['info'] = DB[cap_imgs_dict_st[g]['gurl']]['meta']
+						hits[s_idx]['gurl'] = cap_imgs_dict_st[g]['gurl']
+						DB[gurl]['hit'] = g
+						if verbose == True:
+							log( "Added Guess Value : %s to hits" % str(hits[s_idx]['info']['idx']) )
+						if len(hits.keys()) >= 2:
+							break
+					
+			if len(hits.keys()) >= 2:
+				post_data['answerCap'] = str(hits['0']['info']['idx']) + ',' + str(hits['1']['info']['idx'])
+				KAheaders['Referer'] =  '%s?reUrl=%s' % (post_url,urllib.quote_plus(reUrl))
+				KAheaders['Cookie'] = KAcookie
+				if verbose == True:
+					log(  "*** =========== ***" )
+					log(  "Target: %s" % target )
+					log(  "Hits: %s & %s" % (str(hits['0']['info']['idx']), str(hits['1']['info']['idx'])) )
+					log(  "PostData: %s" % post_data )
+					log(  "KissAnime Headers: %s" % KAheaders  )
+					log(  "*** =========== ***" )
+					
+				post_data['reUrl'] = reUrl
+				try:
+					page = request(post_url, headers=KAheaders, post=encodePostData(post_data), httpsskip=True)
+				except:
+					pass
+				
+				if 'wrong answer' in page.lower():
+					log( "Wrong Answer - Trying process again !" )
+					DB[hits['0']['gurl']]['verified_hit'] = False
+					DB[hits['1']['gurl']]['verified_hit'] = False
+					hits.clear()
+				else:
+					DB[hits['0']['gurl']]['verified_hit'] = True
+					DB[hits['1']['gurl']]['verified_hit'] = True
+					log( "*** =========== ***" )
+					log(url)
+					log( "KISS ANIME CAPTCHA Solver took %s seconds" % str(time.time() - xtime) )
+					log( "*** =========== ***" )
+					success = True
+					selected_val = re.findall(r'<.*&s=(.*?)\" selected>',page)[0]
+					selected_val_c = selected_val.replace('=','')
+					
+					if selected_val_c in DECODE.keys() and DECODE[selected_val_c]['enabled'] == True:
+						Video = re.findall(DECODE[selected_val_c]['regex'],page)[0]
+						if selected_val_c == 'rapidvideo':
+							Video = getAllQuals(Video)
+						else:	
+							Video = [{'qual':'720p', 'link':Video}]
+						DECODE[selected_val_c]['video'] = Video
+						if verbose == True:
+							log( '%s >>> %s\n' % (selected_val_c, Video) )
+					
+					for d in DECODE.keys():
+						if DECODE[d]['enabled'] == True and d != selected_val_c:
+							KAheaders['Referer'] = urlparse.urljoin(BASE_URL, reUrl)
+							fetch_url = urlparse.urljoin(BASE_URL, reUrl.replace('=default','=%s' % d))
+							try:
+								time.sleep(2.0)
+								page = request(fetch_url, headers=KAheaders, httpsskip=True)
+								Video = re.findall(r'%s' % DECODE[d]['regex'],page)[0]
+								if d == 'rapidvideo':
+									Video = getAllQuals(Video)
+								else:	
+									Video = [{'qual':'720p', 'link':Video}]
+								DECODE[d]['video'] = Video
+								if verbose == True:
+									log( '%s >>> %s \n' % (d, Video) )
+							except:
+								pass
+					PROGRESS[url]['status'] = 100
+					PROGRESS[url]['success'] = True
+			else:
+				log( "Max attempts used. Please try again !" )
+			
+	except Exception as e:
+		log( 'Exception: %s' % e )
+		log( "*** =========== ***" )
+		log( target )
+		log( hits )
+		log( post_data )
+		log( KAheaders  )
+		log( "*** =========== ***" )
+		
+	if len(DB.keys()) > 0:
+		DB_file = os.path.join(resources_path, 'DB.json')
+		try:
+			with io.open(DB_file, 'wb') as f:
+				json.dump(DB, f, indent=4, sort_keys=True, separators=(',', ': '))
+				if verbose == True:
+					log( "--- Saved DB file ---" )
+					log( "DB >> No. of stored keys: %s" % str(len(DB.keys())) )
+		except Exception as e:
+			log("ERROR: DB >>> %s" % e)
+
+	if PROGRESS[url]['success'] == True:
+		PROGRESS[url]['playurls'] = DECODE
+		PROGRESS[url]['ts'] = time.time()
+	else:
+		del PROGRESS[url]
+	
+	return DECODE
+	
+def getAllQuals(url):
+	try:
+		video_url_a = []
+		quals = ['720p','480p','360p']
+		for qs in quals:
+			err = ''
+			try:
+				page_link = (url + '&q=%s') % qs
+				page_link_video, r1, r2 = resolveRV(page_link)
+				f_i = {'qual':qs, 'link':page_link_video}
+				video_url_a.append(f_i)
+			except Exception as e:
+				err = '{}'.format(e)
+				log(err)
+		
+		return video_url_a
+	except Exception as e:
+		err = '{}'.format(e)
+		log(err)
+	return video_url_a
+		
+def resolveRV(url):
+	try:
+		video_url = None
+		err = ''
+		try:
+			page_link = url
+			page_data_string = request(page_link, httpsskip=True)
+			video_url = parseDOM(page_data_string, 'div', attrs = {'id': 'home_video'})[0]
+			video_url = parseDOM(video_url, 'source', ret='src')[0]
+		except Exception as e:
+			err = e
+			log(err)
+			
+		return (video_url, err, None)
+	except Exception as e:
+		err = '{}'.format(e)
+		log(err)
+		return (None, err, None)
+	
+GLOBAL_TIMEOUT_FOR_HTTP_REQUEST = 15
+HTTP_GOOD_RESP_CODES = ['200','206']
+GOOGLE_HTTP_GOOD_RESP_CODES_1 = ['429']
+	
+USER_AGENT = "Mozilla/5.0 (Windows NT 6.1; WOW64; rv:48.0) Gecko/20100101 Firefox/48.0"
+IE_USER_AGENT = 'Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; AS; rv:11.0) like Gecko'
+FF_USER_AGENT = 'Mozilla/5.0 (Windows NT 6.3; rv:36.0) Gecko/20100101 Firefox/36.0'
+OPERA_USER_AGENT = 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/47.0.2526.111 Safari/537.36 OPR/34.0.2036.50'
+IOS_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 6_0 like Mac OS X) AppleWebKit/536.26 (KHTML, like Gecko) Version/6.0 Mobile/10A5376e Safari/8536.25'
+ANDROID_USER_AGENT = 'Mozilla/5.0 (Linux; Android 4.4.2; Nexus 4 Build/KOT49H) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/34.0.1847.114 Mobile Safari/537.36'
+#SMU_USER_AGENT = 'URLResolver for Kodi/%s' % (addon_version)
+
+IP_OVERIDE = True
+
+def request(url, close=True, redirect=True, followredirect=False, error=False, proxy=None, post=None, headers=None, mobile=False, limit=None, referer=None, cookie=None, output='', timeout='30', httpsskip=False, use_web_proxy=False, XHR=False, IPv4=False):
+
+# output extended = 4, response = 2, responsecodeext = 2
+	
+	try:
+		handlers = []
+		redirectURL = url
+		
+		if IPv4 == True:
+			setIP4()
+			
+		if error==False and not proxy == None:
+			handlers += [urllib2.ProxyHandler({'http':'%s' % (proxy)}), urllib2.HTTPHandler]
+			opener = urllib2.build_opener(*handlers)
+			opener = urllib2.install_opener(opener)
+
+		if error==False and output == 'cookie2' or output == 'cookie' or output == 'extended' or not close == True:
+			cookies = cookielib.LWPCookieJar()
+			if httpsskip or use_web_proxy:
+				handlers += [urllib2.HTTPHandler(), urllib2.HTTPCookieProcessor(cookies)]
+			else:
+				handlers += [urllib2.HTTPHandler(), urllib2.HTTPSHandler(), urllib2.HTTPCookieProcessor(cookies)]
+			opener = urllib2.build_opener(*handlers)
+			opener = urllib2.install_opener(opener)
+			
+		try:
+			if error==False:
+				if sys.version_info < (2, 7, 9): raise Exception()
+				import ssl; ssl_context = ssl.create_default_context()
+				ssl_context.check_hostname = False
+				ssl_context.verify_mode = ssl.CERT_NONE
+				handlers += [urllib2.HTTPSHandler(context=ssl_context)]
+				opener = urllib2.build_opener(*handlers)
+				opener = urllib2.install_opener(opener)
+		except:
+			pass
+
+		try: headers.update(headers)
+		except: headers = {}
+		if 'User-Agent' in headers:
+			pass
+		elif not mobile == True:
+			#headers['User-Agent'] = agent()
+			#headers['User-Agent'] = Constants.USER_AGENT
+			headers['User-Agent'] = randomagent()		
+		else:
+			headers['User-Agent'] = 'Apple-iPhone/701.341'
+		if 'Referer' in headers:
+			pass
+		elif referer == None:
+			try:
+				headers['Referer'] = '%s://%s/' % (urlparse.urlparse(url).scheme, urlparse.urlparse(url).netloc)
+			except:
+				try:
+					headers['Referer'] = url
+				except:
+					pass
+		else:
+			headers['Referer'] = referer
+		if not 'Accept-Language' in headers:
+			headers['Accept-Language'] = 'en-US'
+		if 'X-Requested-With' in headers:
+			pass
+		elif XHR == True:
+			headers['X-Requested-With'] = 'XMLHttpRequest'
+		if 'Cookie' in headers:
+			pass
+		elif not cookie == None:
+			headers['Cookie'] = cookie
+
+		if error==False and redirect == False:
+			class NoRedirection(urllib2.HTTPErrorProcessor):
+				def http_response(self, request, response): 
+					if IPv4 == True:
+						setIP6()
+					return response
+
+			opener = urllib2.build_opener(NoRedirection)
+			opener = urllib2.install_opener(opener)
+
+			try: del headers['Referer']
+			except: pass
+			
+		redirectHandler = None
+		urlList = []
+		if error==False and followredirect:
+			class HTTPRedirectHandler(urllib2.HTTPRedirectHandler):
+				def redirect_request(self, req, fp, code, msg, headers, newurl):
+					newreq = urllib2.HTTPRedirectHandler.redirect_request(self,
+						req, fp, code, msg, headers, newurl)
+					if newreq is not None:
+						self.redirections.append(newreq.get_full_url())
+					if IPv4 == True:
+						setIP6()
+					return newreq
+			
+			redirectHandler = HTTPRedirectHandler()
+			redirectHandler.max_redirections = 10
+			redirectHandler.redirections = [url]
+
+			opener = urllib2.build_opener(redirectHandler)
+			opener = urllib2.install_opener(opener)
+
+		request = urllib2.Request(url, data=post, headers=headers)
+		#print request
+
+		try:
+			response = urllib2.urlopen(request, timeout=int(timeout))
+			if followredirect:
+				for redURL in redirectHandler.redirections:
+					urlList.append(redURL) # make a list, might be useful
+					redirectURL = redURL
+					
+		except urllib2.HTTPError as response:
+			
+			try:
+				resp_code = response.code
+			except:
+				resp_code = None
+			
+			try:
+				content = response.read()
+			except:
+				content = ''
+				
+			if response.code == 503:
+				#log("AAAA- CODE %s|%s " % (url, response.code))
+				if 'cf-browser-verification' in content:
+					log('cf-browser-verification: CF-OK')
+					
+					netloc = '%s://%s' % (urlparse.urlparse(url).scheme, urlparse.urlparse(url).netloc)
+					cf = getCookie(netloc, headers['User-Agent'], timeout)
+					headers['Cookie'] = cf
+
+					request = urllib2.Request(url, data=post, headers=headers)
+					response = urllib2.urlopen(request, timeout=int(timeout))
+				elif error == False:
+					if IPv4 == True:
+						setIP6()
+					return
+				elif error == True:
+					return '%s: %s' % (response.code, response.reason), content
+			elif response.code == 403:
+				if output == 'response':
+					return response.code, content
+				else:
+					return
+			elif response.code == 307:
+				#log("AAAA- Response read: %s" % response.read(5242880))
+				#log("AAAA- Location: %s" % (response.headers['Location'].rstrip()))
+				cookie = ''
+				try: cookie = '; '.join(['%s=%s' % (i.name, i.value) for i in cookies])
+				except: pass
+				headers['Cookie'] = cookie
+				request = urllib2.Request(response.headers['Location'], data=post, headers=headers)
+				response = urllib2.urlopen(request, timeout=int(timeout))
+				#log("AAAA- BBBBBBB %s" %  response.code)
+			elif resp_code != None:
+				if IPv4 == True:
+					setIP6()
+				if output == 'response':
+					return (resp_code, None)
+				return resp_code
+			elif error == False:
+				#print ("Response code",response.code, response.msg,url)
+				if IPv4 == True:
+					setIP6()
+				return
+			else:
+				if IPv4 == True:
+					setIP6()
+				return
+		except Exception as e:
+			log('ERROR py>request : %s' % url)
+			log('ERROR py>request : %s' % e.args)
+			if IPv4 == True:
+				setIP6()
+			if output == 'response':
+				return (None, None)
+			return None
+
+		if output == 'cookie':
+			try: result = '; '.join(['%s=%s' % (i.name, i.value) for i in cookies])
+			except: pass
+			try: result = cf
+			except: pass
+
+		elif output == 'response':
+			if limit == '0':
+				result = (str(response.code), response.read(224 * 1024))
+			elif not limit == None:
+				result = (str(response.code), response.read(int(limit) * 1024))
+			else:
+				result = (str(response.code), response.read(5242880))
+				
+		elif output == 'responsecodeext':
+			result = (str(response.code),redirectURL)
+			
+		elif output == 'responsecode':
+			result = str(response.code)
+
+		elif output == 'chunk':
+			try: content = int(response.headers['Content-Length'])
+			except: content = (2049 * 1024)
+			#log('CHUNK %s|%s' % (url,content))
+			if content < (2048 * 1024):
+				if IPv4 == True:
+					setIP6()
+				return
+			result = response.read(16 * 1024)
+			if close == True: response.close()
+			if IPv4 == True:
+				setIP6()
+			return result
+
+		elif output == 'extended':
+			try: cookie = '; '.join(['%s=%s' % (i.name, i.value) for i in cookies])
+			except: pass
+			try: cookie = cf
+			except: pass
+			content = response.headers
+			result = response.read(5242880)
+			if IPv4 == True:
+				setIP6()
+			return (result, headers, content, cookie)
+
+		elif output == 'geturl':
+			result = response.geturl()
+
+		elif output == 'headers':
+			content = response.headers
+			if IPv4 == True:
+				setIP6()
+			return content
+
+		else:
+			if limit == '0':
+				result = response.read(224 * 1024)
+			elif not limit == None:
+				result = response.read(int(limit) * 1024)
+			else:
+				result = response.read(5242880)
+
+		if close == True:
+			response.close()
+
+		if IPv4 == True:
+			setIP6()
+		return result
+		
+	except Exception as e:
+		log('ERROR py>request %s, %s' % (e.args,url))
+		if IPv4 == True:
+			setIP6()
+		return
+		
+def setIP4(setoveride=False):
+
+	if setoveride==False and IP_OVERIDE == True:
+		return
+	#replace the original socket.getaddrinfo by our version
+	socket.getaddrinfo = getAddrInfoWrapper
+	socket.has_ipv6 = False
+	
+def setIP6(setoveride=False):
+
+	if setoveride==False and IP_OVERIDE == True:
+		return
+	#replace the IP4 socket.getaddrinfo by original
+	socket.getaddrinfo = origGetAddrInfo
+	socket.has_ipv6 = True
+	
+def encodePostData(data):
+	data = urllib.urlencode(data)
+	return data
+	
+def parseDOM(html, name=u"", attrs={}, ret=False):
+	# Copyright (C) 2010-2011 Tobias Ussing And Henrik Mosgaard Jensen
+
+	if isinstance(html, str):
+		try:
+			html = [html.decode("utf-8")] # Replace with chardet thingy
+		except:
+			html = [html]
+	elif isinstance(html, unicode):
+		html = [html]
+	elif not isinstance(html, list):
+		return u""
+
+	if not name.strip():
+		return u""
+
+	ret_lst = []
+	for item in html:
+		temp_item = re.compile('(<[^>]*?\n[^>]*?>)').findall(item)
+		for match in temp_item:
+			item = item.replace(match, match.replace("\n", " "))
+
+		lst = []
+		for key in attrs:
+			lst2 = re.compile('(<' + name + '[^>]*?(?:' + key + '=[\'"]' + attrs[key] + '[\'"].*?>))', re.M | re.S).findall(item)
+			if len(lst2) == 0 and attrs[key].find(" ") == -1:  # Try matching without quotation marks
+				lst2 = re.compile('(<' + name + '[^>]*?(?:' + key + '=' + attrs[key] + '.*?>))', re.M | re.S).findall(item)
+
+			if len(lst) == 0:
+				lst = lst2
+				lst2 = []
+			else:
+				test = range(len(lst))
+				test.reverse()
+				for i in test:  # Delete anything missing from the next list.
+					if not lst[i] in lst2:
+						del(lst[i])
+
+		if len(lst) == 0 and attrs == {}:
+			lst = re.compile('(<' + name + '>)', re.M | re.S).findall(item)
+			if len(lst) == 0:
+				lst = re.compile('(<' + name + ' .*?>)', re.M | re.S).findall(item)
+
+		if isinstance(ret, str):
+			lst2 = []
+			for match in lst:
+				attr_lst = re.compile('<' + name + '.*?' + ret + '=([\'"].[^>]*?[\'"])>', re.M | re.S).findall(match)
+				if len(attr_lst) == 0:
+					attr_lst = re.compile('<' + name + '.*?' + ret + '=(.[^>]*?)>', re.M | re.S).findall(match)
+				for tmp in attr_lst:
+					cont_char = tmp[0]
+					if cont_char in "'\"":
+						# Limit down to next variable.
+						if tmp.find('=' + cont_char, tmp.find(cont_char, 1)) > -1:
+							tmp = tmp[:tmp.find('=' + cont_char, tmp.find(cont_char, 1))]
+
+						# Limit to the last quotation mark
+						if tmp.rfind(cont_char, 1) > -1:
+							tmp = tmp[1:tmp.rfind(cont_char)]
+					else:
+						if tmp.find(" ") > 0:
+							tmp = tmp[:tmp.find(" ")]
+						elif tmp.find("/") > 0:
+							tmp = tmp[:tmp.find("/")]
+						elif tmp.find(">") > 0:
+							tmp = tmp[:tmp.find(">")]
+
+					lst2.append(tmp.strip())
+			lst = lst2
+		else:
+			lst2 = []
+			for match in lst:
+				endstr = u"</" + name
+
+				start = item.find(match)
+				end = item.find(endstr, start)
+				pos = item.find("<" + name, start + 1 )
+
+				while pos < end and pos != -1:
+					tend = item.find(endstr, end + len(endstr))
+					if tend != -1:
+						end = tend
+					pos = item.find("<" + name, pos + 1)
+
+				if start == -1 and end == -1:
+					temp = u""
+				elif start > -1 and end > -1:
+					temp = item[start + len(match):end]
+				elif end > -1:
+					temp = item[:end]
+				elif start > -1:
+					temp = item[start + len(match):]
+
+				if ret:
+					endstr = item[end:item.find(">", item.find(endstr)) + 1]
+					temp = match + temp + endstr
+
+				item = item[item.find(temp, item.find(match)) + len(temp):]
+				lst2.append(temp)
+			lst = lst2
+		ret_lst += lst
+
+	return ret_lst
+
+def agent():
+	return randomagent()
+
+def randomagent():
+	BR_VERS = [
+		['%s.0' % i for i in xrange(18, 43)],
+		['37.0.2062.103', '37.0.2062.120', '37.0.2062.124', '38.0.2125.101', '38.0.2125.104', '38.0.2125.111', '39.0.2171.71', '39.0.2171.95', '39.0.2171.99', '40.0.2214.93', '40.0.2214.111',
+		 '40.0.2214.115', '42.0.2311.90', '42.0.2311.135', '42.0.2311.152', '43.0.2357.81', '43.0.2357.124', '44.0.2403.155', '44.0.2403.157', '45.0.2454.101', '45.0.2454.85', '46.0.2490.71',
+		 '46.0.2490.80', '46.0.2490.86', '47.0.2526.73', '47.0.2526.80'],
+		['11.0']]
+	WIN_VERS = ['Windows NT 10.0', 'Windows NT 7.0', 'Windows NT 6.3', 'Windows NT 6.2', 'Windows NT 6.1', 'Windows NT 6.0', 'Windows NT 5.1', 'Windows NT 5.0']
+	FEATURES = ['; WOW64', '; Win64; IA64', '; Win64; x64', '']
+	RAND_UAS = ['Mozilla/5.0 ({win_ver}{feature}; rv:{br_ver}) Gecko/20100101 Firefox/{br_ver}',
+				'Mozilla/5.0 ({win_ver}{feature}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{br_ver} Safari/537.36']
+	index = random.randrange(len(RAND_UAS))
+	return RAND_UAS[index].format(win_ver=random.choice(WIN_VERS), feature=random.choice(FEATURES), br_ver=random.choice(BR_VERS[index]))
+
+def getCookie(netloc, ua, timeout=30):
+	try:
+		headers = {'User-Agent': ua, 'Accept-Language': 'en-US,en;q=0.5', 'Accept-Encoding': 'gzip, deflate', 'Accept': 'text/css,*/*;q=0.1'}
+
+		request = urllib2.Request(netloc, headers=headers)
+
+		try:
+			response = urllib2.urlopen(request, timeout=int(timeout))
+		except urllib2.HTTPError as response:
+			result = response.read(5242880)
+			#print result
+			
+		jschl = re.findall('name="jschl_vc" value="(.+?)"/>', result)[0]
+
+		init = re.findall('setTimeout\(function\(\){\s*.*?.*:(.*?)};', result)[-1]
+
+		builder = re.findall(r"challenge-form\'\);\s*(.*)a.v", result)[0]
+
+		decryptVal = parseJSString(init)
+
+		lines = builder.split(';')
+
+		for line in lines:
+
+			if len(line) > 0 and '=' in line:
+
+				sections=line.split('=')
+				line_val = parseJSString(sections[1])
+				decryptVal = int(eval(str(decryptVal)+sections[0][-1]+str(line_val)))
+
+		answer = decryptVal + len(urlparse.urlparse(netloc).netloc)
+
+		query = '%s/cdn-cgi/l/chk_jschl?jschl_vc=%s&jschl_answer=%s' % (netloc, jschl, answer)
+
+		if 'type="hidden" name="pass"' in result:
+			passval = re.findall('name="pass" value="(.*?)"', result)[0]
+			query = '%s/cdn-cgi/l/chk_jschl?pass=%s&jschl_vc=%s&jschl_answer=%s' % (netloc, urllib.quote_plus(passval), jschl, answer)
+			time.sleep(6)
+
+		cookies = cookielib.LWPCookieJar()
+		handlers = [urllib2.HTTPHandler(), urllib2.HTTPSHandler(), urllib2.HTTPCookieProcessor(cookies)]
+		opener = urllib2.build_opener(*handlers)
+		opener = urllib2.install_opener(opener)
+
+		try:
+			request = urllib2.Request(query, headers=headers)
+			response = urllib2.urlopen(request, timeout=int(timeout))
+		except:
+			pass
+
+		cookie = '; '.join(['%s=%s' % (i.name, i.value) for i in cookies])
+		
+		if 'cf_clearance' in cookie:
+			return cookie
+			
+	except Exception as e:
+		log( 'CF Error: %s' % e )
+
+def parseJSString(s):
+	try:
+		offset=1 if s[0]=='+' else 0
+		val = int(eval(s.replace('!+[]','1').replace('!![]','1').replace('[]','0').replace('(','str(')[offset:]))
+		return val
+	except Exception as e:
+		print "parseJSString : %s" % e
+		
+def test():
+	url = 'http://kissanime.ru/Anime/Dies-Irae-Dub/Episode-005?id=140803'
+	decJSON = solveKA(url, verbose=True)
+	log(decJSON)
+
+#test()

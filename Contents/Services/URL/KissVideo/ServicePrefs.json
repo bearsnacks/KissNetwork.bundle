@@ -6,6 +6,20 @@
     "default": "False"
   },
   {
+    "id": "use_captcha_solver",
+    "label": "Use Captcha Solver",
+    "type": "bool",
+    "default": "True"
+  },
+  {
+    "id": "bh_api",
+    "label": "Big Huge Labs API Key (Signup: https://words.bighugelabs.com/api.php)",
+    "type": "text",
+    "option": "hidden",
+    "secure": "true",
+    "default": "c00e667a54b01896ad08130f4489e08d"
+  },
+  {
     "id": "sort_opt",
     "label": "Sort List by...",
     "type": "enum",
@@ -33,7 +47,7 @@
   },
   {
     "id": "kisscartoon",
-    "label": "View Cartoon (Kisscartoon.se)",
+    "label": "View Cartoon (Kisscartoon.me)",
     "type": "bool",
     "default": "True"
   },
