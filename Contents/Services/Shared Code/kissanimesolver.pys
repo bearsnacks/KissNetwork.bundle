@@ -66,13 +66,14 @@ BH_API_DEFAULT = 'c00e667a54b01896ad08130f4489e08d' # signup -> https://words.bi
 BH_API = ''
 
 PROGRESS = {}
-GOOGLE_RES = []
+BLOCKED = []
 
-def getGoogleStatus():
-	if len(GOOGLE_RES) == 0:
-		return True
-	del GOOGLE_RES[:]
-	return False
+def getBlockStatus():
+	if len(BLOCKED) == 0:
+		return False, None
+	msg = BLOCKED[0]
+	del BLOCKED[:]
+	return True, msg
 
 def getProgress(key):
 	if key in PROGRESS.keys():
@@ -98,7 +99,7 @@ def solveKA(url, max_attempts=20, use_matches1=True, use_matches2=True, verbose=
 def solveKA2(url, max_attempts=20, use_matches1=True, use_matches2=True, verbose=False):
 	PROGRESS[url] = {'status':1, 'playurls':None, 'ts':time.time(), 'success':False}
 	DECODE = dict(DECODE_TEMPLATE)
-	BASE_URL = 'http://kissanime.ru'
+	BASE_URL = 'http://%s' % geturlhost(url)
 	hits = {}
 	attempt = 0
 	res = None
@@ -141,7 +142,67 @@ def solveKA2(url, max_attempts=20, use_matches1=True, use_matches2=True, verbose
 					page, KAheaders, KAcontent, KAcookie = request(url, headers=headers, httpsskip=True, output='extended')
 				
 				if reUrl == None:
-					reUrl = re.findall(r'name=\"reUrl\" value=\"(.*?)\"',page)[0]
+					if 'Are you human?' in page and 'g-recaptcha' not in page:
+						if verbose == True:
+							log('Getting Are you human verification url')
+						reUrl = re.findall(r'name=\"reUrl\" value=\"(.*?)\"',page)[0]
+					else:
+						if 'g-recaptcha' in page:
+							g_msg = 'Blocked by re-Captcha ! Please visit site to unblock (use Incognito to avoid cached pages).'
+							BLOCKED.append(g_msg)
+							log('ERROR: %s' % g_msg)
+							return
+						else:
+							log( "*** =========== ***" )
+							log(url)
+							log( "KISS ANIME CAPTCHA Solver took %s seconds" % str(time.time() - xtime) )
+							log( "*** =========== ***" )
+							success = True
+							selected_val_c = ''
+							try:
+								selected_val = re.findall(r'<.*&s=(.*?)\" selected>',page)[0]
+								selected_val_c = selected_val.replace('=','')
+							
+								if selected_val_c in DECODE.keys() and DECODE[selected_val_c]['enabled'] == True:
+								
+									Video = re.findall(DECODE[selected_val_c]['regex'],page)[0]
+									if selected_val_c == 'rapidvideo':
+										Video = getAllQuals(Video)
+									else:	
+										Video = [{'qual':'720p', 'link':Video}]
+									DECODE[selected_val_c]['video'] = Video
+									if verbose == True:
+										log('%s >>>>> %s\n' % (selected_val_c, Video))
+							except Exception as e:
+								log('ERROR: %s' % e)
+							
+							for d in DECODE.keys():
+								if DECODE[d]['enabled'] == True and d != selected_val_c:
+									KAheaders['Referer'] = url
+									fetch_url = url + '&s=%s' % d
+									if verbose == True:
+										log( '%s >>> %s' % (d, fetch_url))
+									try:
+										time.sleep(2.0)
+										page = request(fetch_url, headers=KAheaders, httpsskip=True)
+										if d == 'rapidvideo':
+											Video = re.findall(r'%s' % DECODE[d]['regex'],page)[0]
+											Video = getAllQuals(Video)
+										elif d == 'beta':
+											Video = getAllGoogleQuals(page)
+										else:
+											Video = re.findall(r'%s' % DECODE[d]['regex'],page)[0]
+											Video = [{'qual':'720p', 'link':Video}]
+										DECODE[d]['video'] = Video
+										if verbose == True:
+											log( '%s >>> %s' % (d, Video) )
+									except:
+										pass
+							PROGRESS[url]['status'] = 100
+							PROGRESS[url]['success'] = True
+							PROGRESS[url]['playurls'] = DECODE
+							PROGRESS[url]['ts'] = time.time()
+							return DECODE
 					#print reUrl
 				
 				if post_url == None:
@@ -258,8 +319,9 @@ def solveKA2(url, max_attempts=20, use_matches1=True, use_matches2=True, verbose
 							if res == None:
 								if verbose == True:
 									log( google_search_img )
-								g_msg = 'Blocked by Google-Image or did not responsd !'
-								GOOGLE_RES.append(g_msg)
+								g_msg = 'Blocked by Google-Image or did not respond ! Please visit Google Images and unblock yourself.'
+								BLOCKED.append(g_msg)
+								log('ERROR: %s' % g_msg)
 								raise Exception(g_msg)
 							else:
 								result, headers, content, cookie = res
@@ -514,12 +576,36 @@ def solveKA2(url, max_attempts=20, use_matches1=True, use_matches2=True, verbose
 def getAllQuals(url):
 	try:
 		video_url_a = []
-		quals = ['720p','480p','360p']
+		quals = ['1080p','720p','480p','360p']
 		for qs in quals:
 			err = ''
 			try:
 				page_link = (url + '&q=%s') % qs
 				page_link_video, r1, r2 = resolveRV(page_link)
+				f_i = {'qual':qs, 'link':page_link_video}
+				video_url_a.append(f_i)
+			except Exception as e:
+				err = '{}'.format(e)
+				log(err)
+		
+		return video_url_a
+	except Exception as e:
+		err = '{}'.format(e)
+		log(err)
+	return video_url_a
+	
+def getAllGoogleQuals(page):
+	try:
+		video_url_a = []
+		page_sel = parseDOM(page, 'select', attrs = {'id': 'selectQuality'})[0]
+
+		quals = re.findall(r'">(.*?)<', page_sel)
+		links = re.findall(r'value="(.*?)"', page_sel)
+		for i in range(0,len(quals)):
+			err = ''
+			try:
+				qs = quals[i]
+				page_link_video = links[i]
 				f_i = {'qual':qs, 'link':page_link_video}
 				video_url_a.append(f_i)
 			except Exception as e:
@@ -539,8 +625,10 @@ def resolveRV(url):
 		try:
 			page_link = url
 			page_data_string = request(page_link, httpsskip=True)
-			video_url = parseDOM(page_data_string, 'div', attrs = {'id': 'home_video'})[0]
-			video_url = parseDOM(video_url, 'source', ret='src')[0]
+			video_urlx = parseDOM(page_data_string, 'div', attrs = {'id': 'home_video'})[0]
+			video_urlx = parseDOM(video_urlx, 'source', ret='src')[0]
+			if '.mp4' in video_urlx:
+				video_url = video_urlx
 		except Exception as e:
 			err = e
 			log(err)
@@ -1028,8 +1116,18 @@ def parseJSString(s):
 	except Exception as e:
 		print "parseJSString : %s" % e
 		
+def geturlhost(url):
+	try:
+		urlhost = re.findall('([\w]+[.][\w]+)$', urlparse.urlparse(url.strip().lower()).netloc)[0]
+	except:
+		urlhost = None
+	
+	return urlhost
+		
 def test():
 	url = 'http://kissanime.ru/Anime/Dies-Irae-Dub/Episode-005?id=140803'
+	url = 'http://kimcartoon.me/Cartoon/Zak-Storm/Episode-19?id=77560'
+	url = 'http://kimcartoon.me/Cartoon/6Teen/Season-04-Episode-013-Part-1?id=12833'
 	decJSON = solveKA(url, verbose=True)
 	log(decJSON)
 

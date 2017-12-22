@@ -28,7 +28,7 @@ ERROR_LIST = [
 
 # regex compile
 RE_BASE_URL = Regex(r'(https?://(?:www\.)?[^/]+\.\w+)')
-RE_TYPE_TITLE = Regex(r'^https?://(?:www\.)?(?:kiss|read)(comic|\w+)(?:online)?\.\w+')
+RE_TYPE_TITLE = Regex(r'^https?://(?:www\.)?(?:kiss|kim|read)(comic|\w+)(?:online)?\.\w+')
 
 
 ####################################################################################################

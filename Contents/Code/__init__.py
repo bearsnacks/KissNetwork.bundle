@@ -684,7 +684,9 @@ def DirectoryList(page, pname, category, base_url, type_title, art):
 			drama_title_html = HTML.ElementFromString(item.get('title'))
 		try:
 			if not drama_test:
-				thumb = Common.CorrectCoverImage(title_html.xpath('//img/@src')[0])
+				thumb = Common.CorrectCoverImage(item.xpath('./a/img/@src')[0])
+				if 'http' not in thumb:
+					thumb = base_url + thumb
 			else:
 				thumb = Common.CorrectCoverImage(item.xpath('./a/img/@src')[0])
 			if not 'http' in thumb:
@@ -697,7 +699,8 @@ def DirectoryList(page, pname, category, base_url, type_title, art):
 				cover_file = thumb.rsplit('/')[-1]
 			else:
 				cover_file = thumb.split('/', 3)[3].replace('/', '_')
-		except:
+		except Exception as e:
+			Log(e)
 			thumb = None
 			cover_file = None
 
@@ -718,22 +721,31 @@ def DirectoryList(page, pname, category, base_url, type_title, art):
 		Logger('* thumb			 = {}'.format(thumb))
 
 		if not drama_test:
-			item_title = a_node.text.strip()
+			item_title = a_node.xpath('./span[@class="title"]/text()')[0].strip()
 		else:
 			item_title = a_node.xpath('./span[@class="title"]/text()')[0].strip()
+		Logger('* item_title	 = {}'.format(item_title))
+			
 		if 'Movie' in pname:
 			title2 = item_title
 		else:
 			item_title_cleaned = RE_TITLE_CLEAN.sub('', item_title)
 
-			if not drama_test:
-				latest = item.xpath('./following-sibling::td')[0].text_content().strip().replace(item_title_cleaned, '')
-			else:
-				try:
-					latest = item.xpath('./div[@class="ep-bg"]/a')[0].text_content()
-				except:
-					latest = drama_title_html.xpath('./p')[1].text_content().split(' ')[1]
-			latest = latest.replace('Read Online', '').replace('Watch Online', '').lstrip('_').strip()
+			try:
+				if not drama_test:
+					latest = item.xpath('./following-sibling::td')[0].text_content().strip().replace(item_title_cleaned, '')
+				else:
+					try:
+						latest = item.xpath('./div[@class="ep-bg"]/a')[0].text_content()
+					except:
+						latest = drama_title_html.xpath('./p')[1].text_content().split(' ')[1]
+						
+				latest = latest.replace('Read Online', '').replace('Watch Online', '').lstrip('_').strip()
+			except:
+				latest = ''
+			
+			Log("latest: %s" % latest)
+			
 			if 'Completed' in latest:
 				title2 = u'{} | {} Completed'.format(item_title, type_title)
 			elif 'Not yet aired' in latest:
@@ -1069,7 +1081,7 @@ def MovieSubPage(item_info, movie_info):
 			title = '{} | {}'.format(movie['title'], movie['date'])
 			oc.add(DirectoryObject(
 					title=title,
-					key=Callback(VideoItemPage, item_url=movie['url'], title=title, summary=summary, thumb=cover),
+					key=Callback(VideoItemPage, item_url=movie['url'], title=title, summary=summary, thumb=cover, art=item_info['art']),
 					summary=summary,
 					thumb=cover,
 					art=R(item_info['art'])
@@ -1092,7 +1104,7 @@ def MovieSubPage(item_info, movie_info):
 
 ####################################################################################################
 @route(PREFIX + '/video-item-page', item_info=dict, movie_info=dict)
-def VideoItemPage(item_url, title, summary, thumb, refresh=0):
+def VideoItemPage(item_url, title, summary, thumb, art, refresh=0):
 
 	if kissanimesolver.getProgress(item_url) == -1:
 		Thread.Create(kissanimesolver.solveKA, {}, item_url)
@@ -1102,25 +1114,38 @@ def VideoItemPage(item_url, title, summary, thumb, refresh=0):
 			time.sleep(10)
 	
 	prog = kissanimesolver.getProgress(item_url)
+	blocked_bool, blocked_msg = kissanimesolver.getBlockStatus()
 	
-	if kissanimesolver.getGoogleStatus() == False:
-		return MC.message_container('Google Blocking','Please visit Google Images and unblock yourself !')
+	if blocked_bool == True:
+		return MC.message_container('Blocking',blocked_msg)
 	elif prog == 100:
 		playurls = kissanimesolver.getPlayUrls(item_url)
 		oc = ObjectContainer(title2 = unicode(title))
 		
 		for server in playurls.keys():
-			for vv in playurls[server]['video']:
-				vidurl = vv['link']
-				qual = vv['qual']
-				titlex = '%s (%s - %s)' % (title, server, qual)
-				try:
-					oc.add(CreateVideoObject(vidurl, titlex, summary, thumb))
-				except Exception as e:
-					Log("ERROR : VideoItemPage > %s" % e)
+			vvv = playurls[server]['video']
+			if vvv != None:
+				for vv in vvv:
+					vidurl = vv['link']
+					if vidurl != None:
+						qual = vv['qual']
+						titlex = '%s (%s - %s)' % (title, server, qual)
+						try:
+							oc.add(CreateVideoObject(vidurl, titlex, summary, thumb))
+						except Exception as e:
+							Log("ERROR : VideoItemPage > %s" % e)
 		return oc
 	else:
-		return MC.message_container(u'Please wait and try again: %s' % (str(prog)+'%'), u'Progress: %s. Please wait (Solver working) and try again. It can take from few sec.s to few min.s' % (str(prog)+'%'))
+		#return MC.message_container(u'Please wait and try again: %s' % (str(prog)+'%'), u'Progress: %s. Please wait (Solver working) and try again. It can take from few sec.s to few min.s' % (str(prog)+'%'))
+		oc = ObjectContainer(title2 = unicode('Refresh - %s' % (str(prog)+'%'),))
+		oc.add(DirectoryObject(
+			title='Refresh (%s) - %s' % ((str(prog)+'%'), title),
+			key=Callback(VideoItemPage, item_url=item_url, title=title, summary=summary, thumb=thumb, art=art, refresh=int(refresh)+1),
+			summary='Progress: %s. Please wait (Solver working) and try again. It can take from few sec.s to few min.s' % (str(prog)+'%'),
+			thumb=thumb,
+			art=art
+		))
+		return oc
 
 ####################################################################################################
 @route(PREFIX + '/manga-sub-page', item_info=dict, manga_info=dict)
@@ -1307,7 +1332,7 @@ def SeasonSubPage(season_info):
 				title = nep['title'] if cp in CP_DATE else '{} | {}'.format(nep['title'], (nep['date'] if nep['date'] else 'NA'))
 				oc.add(DirectoryObject(
 						title=title,
-						key=Callback(VideoItemPage, item_url=nep['url'], title=title, summary=title, thumb=thumb),
+						key=Callback(VideoItemPage, item_url=nep['url'], title=title, summary=title, thumb=thumb, art=season_info['art']),
 						summary=title,
 						thumb=thumb,
 						art=R(season_info['art'])
@@ -1330,7 +1355,7 @@ def SeasonSubPage(season_info):
 				title=ep['title'] if cp in CP_DATE else '{} | {}'.format(ep['title'], (ep['date'] if ep['date'] else 'NA'))
 				oc.add(DirectoryObject(
 					title=title,
-					key=Callback(VideoItemPage, item_url=ep['url'], title=title, summary=title, thumb=thumb),
+					key=Callback(VideoItemPage, item_url=ep['url'], title=title, summary=title, thumb=thumb, art=season_info['art']),
 					summary=title,
 					thumb=thumb,
 					art=R(season_info['art'])

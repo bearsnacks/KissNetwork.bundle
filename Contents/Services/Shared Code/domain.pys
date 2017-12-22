@@ -38,11 +38,13 @@ import requests
 def get_domain_dict(fresh=False):
     """cache control for deafutl domain dictionary"""
 
-    url = String.Base64Decode('aHR0cHM6Ly9naXN0LmdpdGh1YnVzZXJjb250ZW50LmNvbS9Ud291cmUvOGJiNTQwMzM3ZGVmYWY3MTg4ZTZjMDE5NDUzMDc2NjEvcmF3')
-    if fresh:
-        default_domain_dict = JSON.ObjectFromURL(url, cacheTime=0)
-    else:
-        default_domain_dict = JSON.ObjectFromURL(url, cacheTime=CACHE_1DAY)
+    #url = String.Base64Decode('aHR0cHM6Ly9naXN0LmdpdGh1YnVzZXJjb250ZW50LmNvbS9Ud291cmUvOGJiNTQwMzM3ZGVmYWY3MTg4ZTZjMDE5NDUzMDc2NjEvcmF3')
+    # if fresh:
+        # default_domain_dict = JSON.ObjectFromURL(url, cacheTime=0)
+    # else:
+        # default_domain_dict = JSON.ObjectFromURL(url, cacheTime=CACHE_1DAY)
+		
+    default_domain_dict = JSON.ObjectFromString(D('eyJkcmFtYSI6ICJodHRwOi8va2lzc2FzaWFuLmNvbSIsICJjb21pYyI6ICJodHRwOi8vcmVhZGNvbWljb25saW5lLnRvIiwgIm1hbmdhIjogImh0dHA6Ly9raXNzbWFuZ2EuY29tIiwgImFuaW1lIjogImh0dHA6Ly9raXNzYW5pbWUucnUiLCAiY2FydG9vbiI6ICJodHRwOi8va2ltY2FydG9vbi5tZSJ9'))
 
     return default_domain_dict
 
