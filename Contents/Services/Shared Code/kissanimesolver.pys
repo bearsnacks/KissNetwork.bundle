@@ -96,7 +96,7 @@ def solveKA(url, max_attempts=20, use_matches1=True, use_matches2=True, verbose=
 		
 	return solveKA2(url, max_attempts, use_matches1, use_matches2, verbose)
 	
-def solveKA2(url, max_attempts=20, use_matches1=True, use_matches2=True, verbose=False):
+def solveKA2(url, rapidPage=None, base_url=None, max_attempts=20, use_matches1=True, use_matches2=True, verbose=False):
 	PROGRESS[url] = {'status':1, 'playurls':None, 'ts':time.time(), 'success':False}
 	DECODE = dict(DECODE_TEMPLATE)
 	BASE_URL = 'http://%s' % geturlhost(url)
@@ -112,6 +112,34 @@ def solveKA2(url, max_attempts=20, use_matches1=True, use_matches2=True, verbose
 	success = False
 	xtime = time.time()
 	
+	if rapidPage != None:
+		# log( 'RapidVideo page url: %s' % rapidPage )
+		
+		# PROGRESS[url]['status'] = 10
+		# rapidPage = request(rapidPage, httpsskip=True, output='geturl')
+		# log( 'RapidVideo page url: %s' % rapidPage )
+		
+		# PROGRESS[url]['status'] = 20
+		# page = request(rapidPage, httpsskip=True)
+		# try:
+			# rapidx = re.findall('<a class=\"specialButton\"*.href=\"(.*?)\">',page)[0]
+			# rapid = base_url + rapidx
+		# except:
+			# rapid = '%s&s=rapidvideo' % url
+			
+		rapid = '%s&s=rapidvideo' % url
+		PROGRESS[url]['status'] = 50
+		
+		log( 'RapidVideo page url: %s' % rapid )
+			
+		if rapid != None:
+			DECODE['rapidvideo']['video'] = getRapidVideo(rapid, DECODE)
+			PROGRESS[url]['status'] = 100
+			PROGRESS[url]['success'] = True
+			PROGRESS[url]['playurls'] = DECODE
+			PROGRESS[url]['ts'] = time.time()
+			return DECODE
+	
 	BH_API = BH_API_DEFAULT
 	try:
 		BH_API_TEMP = Prefs['bh_api']
@@ -123,7 +151,7 @@ def solveKA2(url, max_attempts=20, use_matches1=True, use_matches2=True, verbose
 	try:
 		log( url )
 		
-		while success == False:
+		while success == False and attempt < max_attempts:
 			while len(hits.keys()) < 2 and attempt < max_attempts:
 				log("Attempt: %02d" % (attempt+1))
 				hits.clear()
@@ -573,17 +601,18 @@ def solveKA2(url, max_attempts=20, use_matches1=True, use_matches2=True, verbose
 	
 	return DECODE
 	
-def getAllQuals(url):
+def getAllQuals(url, restrict=False):
 	try:
 		video_url_a = []
 		quals = ['1080p','720p','480p','360p']
 		for qs in quals:
 			err = ''
 			try:
-				page_link = (url + '&q=%s') % qs
-				page_link_video, r1, r2 = resolveRV(page_link)
-				f_i = {'qual':qs, 'link':page_link_video}
-				video_url_a.append(f_i)
+				if restrict == False or (restrict == True and qs == '720p'):
+					page_link = (url + '&q=%s') % qs
+					page_link_video, r1, r2 = resolveRV(page_link)
+					f_i = {'qual':qs, 'link':page_link_video}
+					video_url_a.append(f_i)
 			except Exception as e:
 				err = '{}'.format(e)
 				log(err)
@@ -638,6 +667,13 @@ def resolveRV(url):
 		err = '{}'.format(e)
 		log(err)
 		return (None, err, None)
+	
+def getRapidVideo(fetch_url, decode):
+	page = request(fetch_url, httpsskip=True)
+	selected_val_c = 'rapidvideo'
+	Video = re.findall(decode[selected_val_c]['regex'],page)[0]
+	Video = getAllQuals(Video, restrict=True)
+	return Video
 	
 GLOBAL_TIMEOUT_FOR_HTTP_REQUEST = 15
 HTTP_GOOD_RESP_CODES = ['200','206']
@@ -1050,58 +1086,68 @@ def randomagent():
 	index = random.randrange(len(RAND_UAS))
 	return RAND_UAS[index].format(win_ver=random.choice(WIN_VERS), feature=random.choice(FEATURES), br_ver=random.choice(BR_VERS[index]))
 
-def getCookie(netloc, ua, timeout=30):
+try:
+	import cfscrape
+except ImportError, e:
+	cfscrape = None
+
+####################################################################################################
+	
+def getCookie(netloc, ua, timeout=30, new_method=True):
 	try:
-		headers = {'User-Agent': ua, 'Accept-Language': 'en-US,en;q=0.5', 'Accept-Encoding': 'gzip, deflate', 'Accept': 'text/css,*/*;q=0.1'}
+		if new_method == True:
+			cookie, ua = cfscrape.get_cookie_string(url=netloc, user_agent=ua)
+		else:
+			headers = {'User-Agent': ua, 'Accept-Language': 'en-US,en;q=0.5', 'Accept-Encoding': 'gzip, deflate', 'Accept': 'text/css,*/*;q=0.1'}
 
-		request = urllib2.Request(netloc, headers=headers)
+			request = urllib2.Request(netloc, headers=headers)
 
-		try:
-			response = urllib2.urlopen(request, timeout=int(timeout))
-		except urllib2.HTTPError as response:
-			result = response.read(5242880)
-			#print result
+			try:
+				response = urllib2.urlopen(request, timeout=int(timeout))
+			except urllib2.HTTPError as response:
+				result = response.read(5242880)
+				#print result
+				
+			jschl = re.findall('name="jschl_vc" value="(.+?)"/>', result)[0]
+
+			init = re.findall('setTimeout\(function\(\){\s*.*?.*:(.*?)};', result)[-1]
+
+			builder = re.findall(r"challenge-form\'\);\s*(.*)a.v", result)[0]
+
+			decryptVal = parseJSString(init)
+
+			lines = builder.split(';')
+
+			for line in lines:
+
+				if len(line) > 0 and '=' in line:
+
+					sections=line.split('=')
+					line_val = parseJSString(sections[1])
+					decryptVal = int(eval(str(decryptVal)+sections[0][-1]+str(line_val)))
+
+			answer = decryptVal + len(urlparse.urlparse(netloc).netloc)
+
+			query = '%s/cdn-cgi/l/chk_jschl?jschl_vc=%s&jschl_answer=%s' % (netloc, jschl, answer)
+
+			if 'type="hidden" name="pass"' in result:
+				passval = re.findall('name="pass" value="(.*?)"', result)[0]
+				query = '%s/cdn-cgi/l/chk_jschl?pass=%s&jschl_vc=%s&jschl_answer=%s' % (netloc, urllib.quote_plus(passval), jschl, answer)
+				time.sleep(6)
+
+			cookies = cookielib.LWPCookieJar()
+			handlers = [urllib2.HTTPHandler(), urllib2.HTTPSHandler(), urllib2.HTTPCookieProcessor(cookies)]
+			opener = urllib2.build_opener(*handlers)
+			opener = urllib2.install_opener(opener)
+
+			try:
+				request = urllib2.Request(query, headers=headers)
+				response = urllib2.urlopen(request, timeout=int(timeout))
+			except:
+				pass
+
+			cookie = '; '.join(['%s=%s' % (i.name, i.value) for i in cookies])
 			
-		jschl = re.findall('name="jschl_vc" value="(.+?)"/>', result)[0]
-
-		init = re.findall('setTimeout\(function\(\){\s*.*?.*:(.*?)};', result)[-1]
-
-		builder = re.findall(r"challenge-form\'\);\s*(.*)a.v", result)[0]
-
-		decryptVal = parseJSString(init)
-
-		lines = builder.split(';')
-
-		for line in lines:
-
-			if len(line) > 0 and '=' in line:
-
-				sections=line.split('=')
-				line_val = parseJSString(sections[1])
-				decryptVal = int(eval(str(decryptVal)+sections[0][-1]+str(line_val)))
-
-		answer = decryptVal + len(urlparse.urlparse(netloc).netloc)
-
-		query = '%s/cdn-cgi/l/chk_jschl?jschl_vc=%s&jschl_answer=%s' % (netloc, jschl, answer)
-
-		if 'type="hidden" name="pass"' in result:
-			passval = re.findall('name="pass" value="(.*?)"', result)[0]
-			query = '%s/cdn-cgi/l/chk_jschl?pass=%s&jschl_vc=%s&jschl_answer=%s' % (netloc, urllib.quote_plus(passval), jschl, answer)
-			time.sleep(6)
-
-		cookies = cookielib.LWPCookieJar()
-		handlers = [urllib2.HTTPHandler(), urllib2.HTTPSHandler(), urllib2.HTTPCookieProcessor(cookies)]
-		opener = urllib2.build_opener(*handlers)
-		opener = urllib2.install_opener(opener)
-
-		try:
-			request = urllib2.Request(query, headers=headers)
-			response = urllib2.urlopen(request, timeout=int(timeout))
-		except:
-			pass
-
-		cookie = '; '.join(['%s=%s' % (i.name, i.value) for i in cookies])
-		
 		if 'cf_clearance' in cookie:
 			return cookie
 			

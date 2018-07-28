@@ -30,7 +30,7 @@ if not Updater.initial_run:
 # import local and remote packages
 import messages
 import requests
-import time
+import time, re
 from io import open
 import rhtml as RHTML
 from AuthTools import CheckAdmin
@@ -720,10 +720,17 @@ def DirectoryList(page, pname, category, base_url, type_title, art):
 		Logger('* item_url_final	= {}'.format(item_url_final))
 		Logger('* thumb			 = {}'.format(thumb))
 
-		if not drama_test:
-			item_title = a_node.xpath('./span[@class="title"]/text()')[0].strip()
-		else:
-			item_title = a_node.xpath('./span[@class="title"]/text()')[0].strip()
+		item_title = None
+		try:
+			if not drama_test:
+				item_title = a_node.xpath('./span[@class="title"]/text()')[0].strip()
+			else:
+				item_title = a_node.xpath('./span[@class="title"]/text()')[0].strip()
+		except:
+			pass
+			
+		item_title = item_title if item_title != None else item_sys_name
+			
 		Logger('* item_title	 = {}'.format(item_title))
 			
 		if 'Movie' in pname:
@@ -809,7 +816,7 @@ def HomePageList(tab, category, base_url, type_title, art):
 		title2 = u'{} | Latest {}'.format(item_title, latest)
 		summary = 'NA'  # no summarys are given in the 'Top' lists
 		try:
-			thumb = Common.CorrectCoverImage(node.xpath('./a/img')[0].get('src'))
+			thumb = Common.CorrectCoverImage(node.xpath('./a/img/@src')[0].get('src'))
 			if not 'http' in thumb:
 				thumb = None
 				cover_file = None
@@ -1067,7 +1074,9 @@ def MovieSubPage(item_info, movie_info):
 	oc = ObjectContainer(title2=title2, art=R(item_info['art']))
 
 	html = RHTML.ElementFromURL(item_info['page_url'])
-
+	
+	base_url = item_info['base_url']
+	
 	movie_list = GetItemList(html, item_info['page_url'], item_info['item_title'], item_info['type_title'])
 	if movie_list == 'Not Yet Aired':
 		return MC.message_container(u'Warning', '{} \"{}\" Not Yet Aired.'.format(item_info['type_title'], item_title_decode))
@@ -1081,7 +1090,7 @@ def MovieSubPage(item_info, movie_info):
 			title = '{} | {}'.format(movie['title'], movie['date'])
 			oc.add(DirectoryObject(
 					title=title,
-					key=Callback(VideoItemPage, item_url=movie['url'], title=title, summary=summary, thumb=cover, art=item_info['art']),
+					key=Callback(VideoItemPage, item_url=movie['url'], title=title, summary=summary, thumb=cover, art=item_info['art'], rapidPage=movie['url'], base_url=base_url),
 					summary=summary,
 					thumb=cover,
 					art=R(item_info['art'])
@@ -1104,10 +1113,12 @@ def MovieSubPage(item_info, movie_info):
 
 ####################################################################################################
 @route(PREFIX + '/video-item-page', item_info=dict, movie_info=dict)
-def VideoItemPage(item_url, title, summary, thumb, art, refresh=0):
+def VideoItemPage(item_url, title, summary, thumb, art, refresh=0, rapidPage=None, base_url=None):
 
+	rapidPage = rapidPage if rapidPage != None else item_url
+	
 	if kissanimesolver.getProgress(item_url) == -1:
-		Thread.Create(kissanimesolver.solveKA, {}, item_url)
+		Thread.Create(kissanimesolver.solveKA, {}, item_url, rapidPage, base_url)
 		time.sleep(7)
 	else:
 		if kissanimesolver.getProgress(item_url) != 100:

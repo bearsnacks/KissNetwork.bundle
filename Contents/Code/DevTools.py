@@ -343,7 +343,7 @@ def DevTools(file_to_reset=None, header=None, message=None):
             if Dict['cfscrape_test']:
                 del Dict['cfscrape_test']
                 Dict.Save()
-                SetUpCFTest('Manga')
+                SetUpCFTest('Anime')
                 message = 'Reset cfscrape Code Test'
             else:
                 message = 'No Dict cfscrape Code Test Key to Remove'
